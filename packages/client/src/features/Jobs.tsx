@@ -124,6 +124,16 @@ export function JobDetail({ jobId }: { jobId: string }) {
   const [retrying, setRetrying] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // The retry idempotency token is scoped to ONE jobId. When the SAME mounted
+  // component navigates from job A to job B (hash/deep-link or browser history
+  // back/forward), A's retained token must NOT be reused for B — reusing it
+  // would collide with A's payload-hash idempotency record on the server. A
+  // fresh token per jobId preserves the intended rule in retry(): a resend for
+  // the SAME job after an unknown HTTP outcome reuses that job's token.
+  useEffect(() => {
+    setRetryToken(newRequestId());
+  }, [jobId]);
+
   // Single polling lifecycle keyed on jobId: load once, poll while non-terminal,
   // and on cleanup (jobId change or unmount) both clear AND null the timer so it
   // can never leak or double-fire across renders.

@@ -113,14 +113,23 @@ export class PromptService {
         { status: 409 },
       );
     }
-    const version = this.versions.create({
-      id: newId(),
-      promptId,
-      content,
-      now: nowIso(),
+    // Inserting the immutable version and moving the current-version head
+    // pointer must be atomic with a single timestamp: a failure after the
+    // version insert but before (or during) the head update must not leave an
+    // orphaned version or a head pointing at the old version. runInTransaction
+    // rolls back both writes on any throw and re-throws the original error.
+    // restoreVersion() inherits this atomicity by routing through here.
+    const now = nowIso();
+    return runInTransaction(this.db, () => {
+      const version = this.versions.create({
+        id: newId(),
+        promptId,
+        content,
+        now,
+      });
+      this.prompts.setCurrentVersion(promptId, version.id, now);
+      return version;
     });
-    this.prompts.setCurrentVersion(promptId, version.id, nowIso());
-    return version;
   }
 
   /** Restore an old version by creating a new head with its content. */

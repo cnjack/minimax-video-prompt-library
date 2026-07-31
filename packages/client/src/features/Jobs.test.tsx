@@ -238,4 +238,52 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     expect(goSpy).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /Retry as new job/i })).toBeInTheDocument();
   });
+
+  it('resets the retry token when the same instance navigates from job A to job B', async () => {
+    // getJob resolves a failed job for whichever id is requested.
+    getJob.mockImplementation((id: string) =>
+      Promise.resolve(makeJob({ id, status: 'failed' })),
+    );
+    // The retry outcome is unknown (rejected), so the token is RETAINED for the
+    // current job — this is the precondition that makes a stale-token leak
+    // possible across a jobId change.
+    retryJob.mockRejectedValue(
+      new ApiClientError({
+        code: 'internal_error',
+        message: 'boom',
+        status: 500,
+        requestId: 'r',
+      }),
+    );
+    const user = userEvent.setup();
+
+    // Render the SAME mounted instance for failed job A and retry it.
+    const { rerender } = renderDetail('job-A');
+    let btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    await user.click(btn);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
+    const tokenA = retryJob.mock.calls[0]![1];
+    expect(tokenA).toBeTruthy();
+
+    // Navigate the SAME mounted instance to failed job B (deep-link / history),
+    // NOT a fresh mount. The retained token from A must not leak to B's first
+    // retry, or the server returns a payload-hash idempotency conflict.
+    rerender(
+      <NavProvider>
+        <JobDetail jobId="job-B" />
+      </NavProvider>,
+    );
+    // Wait until job B has loaded and rendered so the retry reflects B and the
+    // token-reset effect has settled.
+    await waitFor(() => expect(screen.getByText('job-B')).toBeInTheDocument());
+    btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    await user.click(btn);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(2));
+    const tokenB = retryJob.mock.calls[1]![1];
+    expect(tokenB).toBeTruthy();
+    // The first retry token for B differs from A's retained token.
+    expect(tokenB).not.toBe(tokenA);
+    // Sanity: the second retry targeted job B.
+    expect(retryJob.mock.calls[1]![0]).toBe('job-B');
+  });
 });

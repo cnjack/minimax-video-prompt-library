@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config.js';
 import { createTestDb, type TestDb } from './dbHarness.js';
 import { JobRepository } from '../db/repositories/jobRepo.js';
@@ -103,6 +103,82 @@ describe('PromptService', () => {
     const copy = promptService.duplicate(detail.prompt.id);
     expect(copy.prompt.id).not.toBe(detail.prompt.id);
     expect(copy.versions[0]!.content).toBe('dupe me {{x}}');
+  });
+});
+
+describe('PromptService.createVersion atomicity', () => {
+  // createVersion inserts an immutable version and moves the head pointer in a
+  // single SQLite transaction. If the head-pointer update fails, the version
+  // insert must roll back (no orphaned version) and the previous head must stay
+  // current. Fresh repos on the shared test DB let us spy on setCurrentVersion
+  // without touching the module-level promptService.
+  function freshService() {
+    const prompts = new PromptRepository(testDb.db);
+    const versions = new VersionRepository(testDb.db);
+    const service = new PromptService(prompts, versions, testDb.db);
+    return { prompts, versions, service };
+  }
+
+  it('rolls back the version insert when setCurrentVersion fails (no orphan, head unchanged)', () => {
+    const { prompts, versions, service } = freshService();
+    const detail = service.create({
+      name: 'P',
+      description: 'd',
+      tags: [],
+      content: 'v1',
+      status: 'active',
+    });
+    const v2 = service.createVersion(detail.prompt.id, 'v2');
+    const headBefore = service.getDetail(detail.prompt.id).prompt.currentVersionId;
+    expect(headBefore).toBe(v2.id);
+    const countBefore = versions.listByPrompt(detail.prompt.id).length;
+    expect(countBefore).toBe(2);
+
+    // Force the head-pointer update to fail mid-operation.
+    const boom = new Error('setCurrentVersion boom');
+    const spy = vi
+      .spyOn(prompts, 'setCurrentVersion')
+      .mockImplementation(() => {
+        throw boom;
+      });
+
+    // createVersion must throw the ORIGINAL error (not a rollback-masked one).
+    expect(() => service.createVersion(detail.prompt.id, 'v3')).toThrow(boom);
+    spy.mockRestore();
+
+    // The rolled-back version insert left no orphan row ...
+    expect(versions.listByPrompt(detail.prompt.id)).toHaveLength(countBefore);
+    // ... and the previous head is still current.
+    expect(service.getDetail(detail.prompt.id).prompt.currentVersionId).toBe(headBefore);
+  });
+
+  it('restoreVersion inherits the atomicity (restore-as-new-head rolls back on failure)', () => {
+    const { prompts, versions, service } = freshService();
+    const detail = service.create({
+      name: 'P',
+      description: 'd',
+      tags: [],
+      content: 'first',
+      status: 'active',
+    });
+    const v1 = detail.versions[0]!;
+    service.createVersion(detail.prompt.id, 'second');
+    const headBefore = service.getDetail(detail.prompt.id).prompt.currentVersionId;
+    const countBefore = versions.listByPrompt(detail.prompt.id).length;
+    expect(countBefore).toBe(2);
+
+    // restoreVersion routes through createVersion, so the same atomicity applies.
+    const boom = new Error('setCurrentVersion boom');
+    const spy = vi
+      .spyOn(prompts, 'setCurrentVersion')
+      .mockImplementation(() => {
+        throw boom;
+      });
+    expect(() => service.restoreVersion(detail.prompt.id, v1.id)).toThrow(boom);
+    spy.mockRestore();
+
+    expect(versions.listByPrompt(detail.prompt.id)).toHaveLength(countBefore);
+    expect(service.getDetail(detail.prompt.id).prompt.currentVersionId).toBe(headBefore);
   });
 });
 
