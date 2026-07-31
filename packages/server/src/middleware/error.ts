@@ -10,7 +10,7 @@ import { ZodError } from 'zod';
 import { ErrorCode, type ApiErrorBody } from '@h3/shared';
 import { ApiError } from '../errors.js';
 
-type ExpressError = Error & { status?: number; code?: string };
+type ExpressError = Error & { status?: number; code?: string; type?: string };
 
 export function notFound(_req: Request, res: Response): void {
   writeError(res, new ApiError(ErrorCode.NOT_FOUND, 'Resource not found.'));
@@ -37,6 +37,11 @@ export function errorHandler(
     res.status(400).json({ error: body });
     return;
   }
+  const parserError = bodyParserError(err);
+  if (parserError) {
+    writeError(res, parserError);
+    return;
+  }
   // Unexpected error — never leak internals.
   console.error(`[error] request=${getRequestId(res)} message=${err.message}`);
   writeError(
@@ -45,6 +50,42 @@ export function errorHandler(
       status: 500,
     }),
   );
+}
+
+/**
+ * Recognize an express/body-parser JSON failure by its typed `type` field and
+ * translate it into a safe, non-leaking ApiError. This avoids parsing the
+ * parser's `message` (which contains attacker-controlled body fragments and
+ * internal offsets) and avoids fragile message-substring matching.
+ *
+ *   entity.too.large     -> 413 (the configured 1 MiB body limit was exceeded)
+ *   entity.parse.failed  -> 400 (malformed JSON)
+ *
+ * `encoding.failed`, `request.size.invalid`, and `request.abort` are likewise
+ * client-side body problems and are mapped to the same safe 400. Other parser
+ * types (charset/encoding unsupported, verify) are intentionally left to fall
+ * through to the generic handler; they are not reachable through express.json.
+ */
+function bodyParserError(err: ExpressError): ApiError | null {
+  switch (err.type) {
+    case 'entity.too.large':
+      return new ApiError(
+        ErrorCode.BAD_REQUEST,
+        'The request body exceeds the maximum allowed size.',
+        { status: 413 },
+      );
+    case 'entity.parse.failed':
+    case 'encoding.failed':
+    case 'request.size.invalid':
+    case 'request.abort':
+      return new ApiError(
+        ErrorCode.BAD_REQUEST,
+        'The request body could not be parsed as JSON.',
+        { status: 400 },
+      );
+    default:
+      return null;
+  }
 }
 
 function writeError(res: Response, error: ApiError): void {

@@ -286,4 +286,147 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     // Sanity: the second retry targeted job B.
     expect(retryJob.mock.calls[1]![0]).toBe('job-B');
   });
+
+  it('retains job A\'s retry token across A→B→A after an unknown/failed A outcome', async () => {
+    // getJob resolves a failed job for whichever id is requested.
+    getJob.mockImplementation((id: string) =>
+      Promise.resolve(makeJob({ id, status: 'failed' })),
+    );
+    // A's first retry outcome is UNKNOWN (rejected), so A's token must be
+    // RETAINED. Returning to A must reuse it — NOT mint a fresh token (a fresh
+    // token would create a SECOND paid provider job on the server).
+    retryJob.mockRejectedValue(
+      new ApiClientError({
+        code: 'internal_error',
+        message: 'boom',
+        status: 500,
+        requestId: 'r',
+      }),
+    );
+    const user = userEvent.setup();
+
+    // Render the SAME mounted instance for failed job A and retry it.
+    const { rerender } = renderDetail('job-A');
+    let btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    await user.click(btn);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
+    const tokenA = retryJob.mock.calls[0]![1];
+    expect(tokenA).toBeTruthy();
+
+    // Navigate A→B, then B→A, on the SAME mounted instance (deep-link / history).
+    rerender(
+      <NavProvider>
+        <JobDetail jobId="job-B" />
+      </NavProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('job-B')).toBeInTheDocument());
+    rerender(
+      <NavProvider>
+        <JobDetail jobId="job-A" />
+      </NavProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('job-A')).toBeInTheDocument());
+
+    // Retrying A again must reuse A's RETAINED token (no second paid generation).
+    btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    await user.click(btn);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(2));
+    expect(retryJob.mock.calls[1]![0]).toBe('job-A');
+    expect(retryJob.mock.calls[1]![1]).toBe(tokenA);
+  });
+
+  it('a late A retry RESULT cannot pollute or navigate the B view', async () => {
+    // A's retry resolves LATE (a deferred promise that we settle only after we
+    // have navigated away to job B). This simulates a response that was lost and
+    // then arrives while a different job is displayed.
+    getJob.mockImplementation((id: string) =>
+      Promise.resolve(makeJob({ id, status: 'failed' })),
+    );
+    const aDeferred = createDeferred<{ job: GenerationJob; reused: boolean }>();
+    retryJob.mockImplementation((id: string) => {
+      if (id === 'job-A') return aDeferred.promise;
+      // B's own retry is a normal fresh (non-reused) job.
+      return Promise.resolve({ job: makeJob({ id: 'job-B-new', status: 'queued' }), reused: false });
+    });
+    const user = userEvent.setup();
+
+    const { rerender } = renderDetail('job-A');
+    const btnA = await screen.findByRole('button', { name: /Retry as new job/i });
+    await user.click(btnA);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
+    const tokenA = retryJob.mock.calls[0]![1];
+
+    // Navigate to B while A's retry is still pending. B loads and renders.
+    rerender(
+      <NavProvider>
+        <JobDetail jobId="job-B" />
+      </NavProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('job-B')).toBeInTheDocument());
+
+    // Now A's late RESULT arrives (B is current). It must NOT navigate to A's new
+    // job, must NOT surface anything on the B view, and must NOT disable B.
+    aDeferred.resolve({ job: makeJob({ id: 'job-A-new', status: 'queued' }), reused: false });
+    // Let any (incorrect) pending state updates flush.
+    await waitFor(() =>
+      expect(screen.queryByText(/job-A-new/i)).not.toBeInTheDocument(),
+    );
+    expect(goSpy).not.toHaveBeenCalledWith({ name: 'job', jobId: 'job-A-new' });
+    expect(goSpy).not.toHaveBeenCalled();
+    // The B view is intact and interactive.
+    expect(screen.getByText('job-B')).toBeInTheDocument();
+    const btnB = await screen.findByRole('button', { name: /Retry as new job/i });
+    expect(btnB).not.toBeDisabled();
+
+    // B's own retry uses B's OWN token (never A's) and navigates to B's job.
+    await user.click(btnB);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(2));
+    expect(retryJob.mock.calls[1]![0]).toBe('job-B');
+    const tokenB = retryJob.mock.calls[1]![1];
+    expect(tokenB).toBeTruthy();
+    expect(tokenB).not.toBe(tokenA);
+    await waitFor(() =>
+      expect(goSpy).toHaveBeenCalledWith({ name: 'job', jobId: 'job-B-new' }),
+    );
+  });
+
+  it('a late A retry ERROR cannot pollute the B view', async () => {
+    getJob.mockImplementation((id: string) =>
+      Promise.resolve(makeJob({ id, status: 'failed' })),
+    );
+    const aDeferred = createDeferred<{ job: GenerationJob; reused: boolean }>();
+    retryJob.mockImplementation((id: string) => {
+      if (id === 'job-A') return aDeferred.promise;
+      return Promise.resolve({ job: makeJob({ id: 'job-B-new', status: 'queued' }), reused: false });
+    });
+    const user = userEvent.setup();
+
+    const { rerender } = renderDetail('job-A');
+    const btnA = await screen.findByRole('button', { name: /Retry as new job/i });
+    await user.click(btnA);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <NavProvider>
+        <JobDetail jobId="job-B" />
+      </NavProvider>,
+    );
+    await waitFor(() => expect(screen.getByText('job-B')).toBeInTheDocument());
+
+    // A's late ERROR arrives while B is current. B must NOT show A's error and
+    // must NOT navigate. A's token is retained (cache untouched on error).
+    aDeferred.reject(
+      new ApiClientError({
+        code: 'internal_error',
+        message: 'A-only-failure',
+        status: 500,
+        requestId: 'rA',
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/A-only-failure/i)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText('job-B')).toBeInTheDocument();
+    expect(goSpy).not.toHaveBeenCalled();
+  });
 });

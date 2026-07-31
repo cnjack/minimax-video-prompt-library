@@ -28,9 +28,14 @@ export function createApp(deps: AppDeps): Express {
   const app = express();
   app.disable('x-powered-by');
   app.use(cors());
-  app.use(express.json({ limit: '1mb' }));
+  // Request id (and the redacted request log) MUST run BEFORE body parsing so
+  // that a JSON parse / size failure — which throws in the express.json
+  // middleware before any route runs — still gets the same safe request id
+  // header and `requestId` envelope as every other API failure. Otherwise the
+  // error middleware would report `requestId: "unknown"` with no header.
   app.use(requestId);
   app.use(requestLog);
+  app.use(express.json({ limit: '1mb' }));
 
   app.use('/api', createHealthRouter(config));
   app.use('/api/prompts/:promptId/versions', createVersionsRouter(services));

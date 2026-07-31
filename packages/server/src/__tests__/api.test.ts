@@ -384,3 +384,48 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
     expect(jobs.list({ limit: 100 })).toHaveLength(1);
   });
 });
+
+describe('body-parser failures keep the safe request-id / envelope contract', () => {
+  it('returns 400 bad_request for malformed JSON with a real (non-unknown) request id', async () => {
+    // Raw malformed JSON with an explicit application/json content type so the
+    // express.json middleware attempts to parse it (and fails).
+    const res = await request(app)
+      .post('/api/prompts')
+      .set('Content-Type', 'application/json')
+      .set('X-Request-Id', 'parse-fail-1')
+      .send('{ this is not valid json');
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('bad_request');
+    // Parse/size failures must share the same request-id contract as every other
+    // API failure: a real id (never "unknown") echoed in both the header and the
+    // error envelope.
+    expect(res.body.error.requestId).toBe('parse-fail-1');
+    expect(res.headers['x-request-id']).toBe('parse-fail-1');
+    // The parser's internal message / body fragment is never leaked.
+    expect(res.body.error.message).not.toMatch(/this is not valid json/i);
+    expect(res.body.error.message).toMatch(/parsed as JSON/i);
+  });
+
+  it('returns 413 bad_request for a body larger than the configured 1 MiB limit', async () => {
+    // ~1.05 MiB of JSON, comfortably above the 1 MiB express.json limit.
+    const oversized = JSON.stringify({ padding: 'x'.repeat(1_100_000) });
+    const res = await request(app)
+      .post('/api/prompts')
+      .set('Content-Type', 'application/json')
+      .set('X-Request-Id', 'too-large-1')
+      .send(oversized);
+    expect(res.status).toBe(413);
+    expect(res.body.error.code).toBe('bad_request');
+    expect(res.body.error.requestId).toBe('too-large-1');
+    expect(res.headers['x-request-id']).toBe('too-large-1');
+    expect(res.body.error.message).toMatch(/exceeds the maximum allowed size/i);
+  });
+
+  it('control: a valid request still succeeds (parser/limit do not block normal traffic)', async () => {
+    const res = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'Valid control', content: 'x' })
+      .expect(201);
+    expect(res.body.prompt.id).toBeTruthy();
+  });
+});

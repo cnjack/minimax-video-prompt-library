@@ -1,7 +1,7 @@
 /** Job history list and job detail view. The client polls the server's job
  * endpoint (never the provider) to reflect the server-side poller's updates. */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GenerationJob, JobStatus } from '@h3/shared';
 import { api, ApiClientError } from '../api/client.js';
 import { useNav } from '../nav.js';
@@ -118,21 +118,54 @@ export function JobsList() {
 
 export function JobDetail({ jobId }: { jobId: string }) {
   const { go } = useNav();
-  const [retryToken, setRetryToken] = useState<string>(newRequestId);
+  // Per-jobId retry-token cache, scoped to this mounted instance's lifetime.
+  // Kept in a ref (NOT state) so mutating it never triggers a re-render.
+  //
+  // This preserves retry idempotency across A→B→A navigation: an unresolved
+  // retry for job A (response lost / unknown HTTP outcome) must keep A's token
+  // so revisiting A reuses it — minting a fresh token would create a SECOND
+  // paid provider job, since server idempotency is keyed by this client token.
+  // Each job still gets its OWN distinct first token (so A's token never leaks
+  // to B and collides with B's payload-hash idempotency record).
+  const tokensByJobId = useRef<Map<string, string>>(new Map());
+
+  /** Get-or-create the retained retry token for a job. Idempotent. */
+  const getRetryToken = useCallback((id: string): string => {
+    const existing = tokensByJobId.current.get(id);
+    if (existing) return existing;
+    const token = newRequestId();
+    tokensByJobId.current.set(id, token);
+    return token;
+  }, []);
+
+  /** After an observed retry RESPONSE for a job, replace its cached token so the
+   * next deliberate retry is a new attempt (a fresh job), not a reuse. Safe to
+   * call even after navigation: it only touches this job's cache entry. */
+  const rotateRetryToken = useCallback((id: string): void => {
+    tokensByJobId.current.set(id, newRequestId());
+  }, []);
+
+  const [retryToken, setRetryToken] = useState<string>(() => getRetryToken(jobId));
   const [job, setJob] = useState<GenerationJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // The retry idempotency token is scoped to ONE jobId. When the SAME mounted
-  // component navigates from job A to job B (hash/deep-link or browser history
-  // back/forward), A's retained token must NOT be reused for B — reusing it
-  // would collide with A's payload-hash idempotency record on the server. A
-  // fresh token per jobId preserves the intended rule in retry(): a resend for
-  // the SAME job after an unknown HTTP outcome reuses that job's token.
+  // Mirror the current jobId into a ref on every render so an in-flight retry()
+  // — whose closure captured the jobId from when it was STARTED — can still read
+  // the LATEST job identity after navigation. This is what lets a retry for job A
+  // that settles while job B is displayed detect that it is no longer current.
+  const jobIdRef = useRef(jobId);
+  jobIdRef.current = jobId;
+
+  // On every job change: adopt that job's RETAINED token from the cache (or mint
+  // a new one the first time it is seen), and reset the visible retry state —
+  // the newly displayed job has not started a retry. The token cache itself is
+  // deliberately NOT cleared, which is what preserves A→B→A token retention.
   useEffect(() => {
-    setRetryToken(newRequestId());
-  }, [jobId]);
+    setRetryToken(getRetryToken(jobId));
+    setRetrying(false);
+  }, [jobId, getRetryToken]);
 
   // Single polling lifecycle keyed on jobId: load once, poll while non-terminal,
   // and on cleanup (jobId change or unmount) both clear AND null the timer so it
@@ -171,15 +204,30 @@ export function JobDetail({ jobId }: { jobId: string }) {
 
   async function retry() {
     if (retrying) return;
+    // Capture the identity of THIS attempt. A retry that settles AFTER the user
+    // has navigated to a different job must not overwrite the now-current job's
+    // token/error/retrying state or navigate away from it. It may still update
+    // this job's CACHED token after a known response, but every VISIBLE side
+    // effect below is guarded by `attemptJobId === jobIdRef.current` (still
+    // current). The ref (not the closed-over `jobId`) is read so a retry started
+    // on job A still sees job B as current after navigation.
+    const attemptJobId = jobId;
+    const attemptToken = retryToken;
     setRetrying(true);
     setError(null);
     try {
-      const result = await api.retryJob(jobId, retryToken);
-      // A response was observed: rotate the token so the next deliberate retry
-      // click is a new attempt (a fresh job), not a reuse of this one.
-      setRetryToken(newRequestId());
+      const result = await api.retryJob(attemptJobId, attemptToken);
+      // A response was observed for this job: rotate its cached token so the
+      // next deliberate retry is a new attempt (a fresh job), not a reuse. This
+      // only touches this job's cache entry, so it is safe after navigation.
+      rotateRetryToken(attemptJobId);
+      if (attemptJobId !== jobIdRef.current) return;
+      // Adopt the freshly rotated token into the visible state (only when this
+      // job is still the current one).
+      setRetryToken(getRetryToken(attemptJobId));
       if (!result.reused || !TERMINAL.includes(result.job.status)) {
-        // A fresh (or still in-progress) job — navigate to it.
+        // A fresh (or still in-progress) job — navigate to it. Navigation may
+        // occur only if the initiating job is still current.
         go({ name: 'job', jobId: result.job.id });
       } else {
         // This retry attempt already finished terminally (e.g. a transport retry
@@ -190,11 +238,16 @@ export function JobDetail({ jobId }: { jobId: string }) {
         );
       }
     } catch (e) {
-      // Outcome unknown or failed: KEEP the token so a resend reuses the same
-      // retried job (no double charge). Do not rotate here.
-      setError(e instanceof ApiClientError ? e.message : 'Failed to retry job.');
+      // Outcome unknown or failed: KEEP the token (do not rotate) so a resend
+      // reuses the same retried job (no double charge). Do not touch visible
+      // state unless this job is still current.
+      if (attemptJobId === jobIdRef.current) {
+        setError(e instanceof ApiClientError ? e.message : 'Failed to retry job.');
+      }
     } finally {
-      setRetrying(false);
+      if (attemptJobId === jobIdRef.current) {
+        setRetrying(false);
+      }
     }
   }
 
