@@ -421,6 +421,49 @@ describe('body-parser failures keep the safe request-id / envelope contract', ()
     expect(res.body.error.message).toMatch(/exceeds the maximum allowed size/i);
   });
 
+  it('returns 415 bad_request for an unsupported JSON charset with a real request id and a safe message', async () => {
+    // body-parser rejects any non-utf-* charset before parsing
+    // (lib/types/json.js): `application/json; charset=iso-8859-1` throws a
+    // typed `charset.unsupported` error that must map to a safe 415, not the
+    // generic 500/internal_error path.
+    const res = await request(app)
+      .post('/api/prompts')
+      .set('Content-Type', 'application/json; charset=iso-8859-1')
+      .set('X-Request-Id', 'charset-1')
+      .send('{"name":"x","content":"x"}');
+    expect(res.status).toBe(415);
+    expect(res.body.error.code).toBe('bad_request');
+    // The parser failure must share the same request-id contract as every other
+    // API failure: a real id (never "unknown") echoed in both header and body.
+    expect(res.body.error.requestId).toBe('charset-1');
+    expect(res.headers['x-request-id']).toBe('charset-1');
+    expect(res.body.error.requestId).not.toBe('unknown');
+    // Only a safe static message — never the charset value or parser internals.
+    expect(res.body.error.message).toBe('The request content type or encoding is not supported.');
+    expect(res.body.error.message).not.toMatch(/iso-8859-1/i);
+  });
+
+  it('returns 415 bad_request for an unsupported request content encoding with a real request id and a safe message', async () => {
+    // body-parser's read path (lib/read.js -> contentstream) throws a typed
+    // `encoding.unsupported` error synchronously for any Content-Encoding it
+    // cannot inflate (neither identity/gzip/deflate), e.g. `br`. Supertest
+    // produces this request deterministically by sending the header verbatim,
+    // so this is exercised end-to-end (no paid provider, no real decoding).
+    const res = await request(app)
+      .post('/api/prompts')
+      .set('Content-Type', 'application/json')
+      .set('Content-Encoding', 'br')
+      .set('X-Request-Id', 'encoding-1')
+      .send('{"name":"x","content":"x"}');
+    expect(res.status).toBe(415);
+    expect(res.body.error.code).toBe('bad_request');
+    expect(res.body.error.requestId).toBe('encoding-1');
+    expect(res.headers['x-request-id']).toBe('encoding-1');
+    expect(res.body.error.requestId).not.toBe('unknown');
+    expect(res.body.error.message).toBe('The request content type or encoding is not supported.');
+    expect(res.body.error.message).not.toMatch(/\bbr\b/i);
+  });
+
   it('control: a valid request still succeeds (parser/limit do not block normal traffic)', async () => {
     const res = await request(app)
       .post('/api/prompts')

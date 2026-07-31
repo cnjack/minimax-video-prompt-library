@@ -39,6 +39,13 @@ export function errorHandler(
   }
   const parserError = bodyParserError(err);
   if (parserError) {
+    // Parser errors originate in the body-parsing phase, before any route ran,
+    // so the response has normally never started. `request.aborted` is the one
+    // exception: the client disconnected mid-body, so only reply while the
+    // underlying socket is still writable.
+    if (!res.writable) {
+      return;
+    }
     writeError(res, parserError);
     return;
   }
@@ -55,16 +62,27 @@ export function errorHandler(
 /**
  * Recognize an express/body-parser JSON failure by its typed `type` field and
  * translate it into a safe, non-leaking ApiError. This avoids parsing the
- * parser's `message` (which contains attacker-controlled body fragments and
- * internal offsets) and avoids fragile message-substring matching.
+ * parser's `message` (which carries attacker-controlled body fragments and
+ * internal offsets) and avoids fragile message-substring matching. The type
+ * values below are the real `createError` types emitted by the locked
+ * body-parser 1.20.x / raw-body 2.5.x stack (body-parser lib/types/json.js and
+ * lib/read.js; raw-body index.js).
  *
  *   entity.too.large     -> 413 (the configured 1 MiB body limit was exceeded)
  *   entity.parse.failed  -> 400 (malformed JSON)
+ *   request.size.invalid -> 400 (a bad/unsatisfiable Content-Length)
+ *   request.aborted      -> 400 (client disconnected mid-body; only replied to
+ *                            while the response is still writable)
+ *   charset.unsupported  -> 415 (a JSON charset that is not utf-*, emitted by
+ *                            body-parser before parsing, e.g.
+ *                            `application/json; charset=iso-8859-1`)
+ *   encoding.unsupported -> 415 (an unsupported Content-Encoding, e.g. `br`)
  *
- * `encoding.failed`, `request.size.invalid`, and `request.abort` are likewise
- * client-side body problems and are mapped to the same safe 400. Other parser
- * types (charset/encoding unsupported, verify) are intentionally left to fall
- * through to the generic handler; they are not reachable through express.json.
+ * `stream.encoding.set` is intentionally NOT mapped: it signals server /
+ * middleware misuse (raw-body refuses a stream whose encoding was already set)
+ * and must stay on the generic 500 path rather than masquerade as a client
+ * error. There is no `encoding.failed` or `request.abort` type in this stack —
+ * the real aborted type is `request.aborted`.
  */
 function bodyParserError(err: ExpressError): ApiError | null {
   switch (err.type) {
@@ -75,13 +93,19 @@ function bodyParserError(err: ExpressError): ApiError | null {
         { status: 413 },
       );
     case 'entity.parse.failed':
-    case 'encoding.failed':
     case 'request.size.invalid':
-    case 'request.abort':
+    case 'request.aborted':
       return new ApiError(
         ErrorCode.BAD_REQUEST,
         'The request body could not be parsed as JSON.',
         { status: 400 },
+      );
+    case 'charset.unsupported':
+    case 'encoding.unsupported':
+      return new ApiError(
+        ErrorCode.BAD_REQUEST,
+        'The request content type or encoding is not supported.',
+        { status: 415 },
       );
     default:
       return null;
