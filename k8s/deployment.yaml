@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: h3-prompt-studio
+  namespace: jcode
+  labels:
+    app.kubernetes.io/name: h3-prompt-studio
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single-instance SQLite: avoid concurrent writers
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: h3-prompt-studio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: h3-prompt-studio
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: h3-prompt-studio
+          image: h3-prompt-studio:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3001
+          envFrom:
+            - configMapRef:
+                name: h3-prompt-studio-config
+            - secretRef:
+                name: h3-prompt-studio-secrets
+          env:
+            - name: NODE_OPTIONS
+              value: "--experimental-sqlite --disable-warning=ExperimentalWarning"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: h3-prompt-studio-data

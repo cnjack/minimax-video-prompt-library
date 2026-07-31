@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: h3-prompt-studio-config
+  namespace: jcode
+  labels:
+    app.kubernetes.io/name: h3-prompt-studio
+data:
+  # Default to deterministic mock mode. Set to "minimax" and supply the secret
+  # below to use the real MiniMax H3 API.
+  PROVIDER_MODE: "mock"
+  SEED_SAMPLES: "true"
+  POLL_INTERVAL_MS: "2000"
+  POLL_MAX_ATTEMPTS: "120"
+  DB_PATH: "/data/h3-studio.db"
+  CLIENT_DIST: "/app/packages/client/dist"
