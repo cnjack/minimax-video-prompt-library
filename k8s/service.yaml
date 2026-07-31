@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: h3-prompt-studio
+  namespace: jcode
+  labels:
+    app.kubernetes.io/name: h3-prompt-studio
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: h3-prompt-studio
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
