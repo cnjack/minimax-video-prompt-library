@@ -13,6 +13,8 @@ import {
 } from '@h3/shared';
 import type { PromptRepository } from '../db/repositories/promptRepo.js';
 import type { VersionRepository } from '../db/repositories/versionRepo.js';
+import type { DB } from '../db/client.js';
+import { runInTransaction } from '../db/client.js';
 import { ApiError } from '../errors.js';
 import { newId, nowIso } from '../util.js';
 
@@ -35,28 +37,37 @@ export class PromptService {
   constructor(
     private readonly prompts: PromptRepository,
     private readonly versions: VersionRepository,
+    private readonly db: DB,
   ) {}
 
   create(input: CreatePromptInput): PromptDetail {
     const now = nowIso();
     const promptId = newId();
-    const prompt = this.prompts.create({
-      id: promptId,
-      name: input.name,
-      description: input.description,
-      tags: input.tags,
-      status: input.status,
-      now,
+    // Creating the prompt identity, its first immutable version, and the
+    // current-version pointer must be atomic: a failure partway through must not
+    // leave an orphaned prompt row with no version (or a prompt pointing at a
+    // non-existent version). The whole create runs in one SQLite transaction.
+    const head = runInTransaction(this.db, () => {
+      this.prompts.create({
+        id: promptId,
+        name: input.name,
+        description: input.description,
+        tags: input.tags,
+        status: input.status,
+        now,
+      });
+      const created = this.versions.create({
+        id: newId(),
+        promptId,
+        content: input.content,
+        now,
+      });
+      this.prompts.setCurrentVersion(promptId, created.id, now);
+      return created;
     });
-    const head = this.versions.create({
-      id: newId(),
-      promptId,
-      content: input.content,
-      now,
-    });
-    this.prompts.setCurrentVersion(promptId, head.id, now);
+    const prompt = this.prompts.getById(promptId);
     return {
-      prompt: { ...prompt, currentVersionId: head.id },
+      prompt: { ...(prompt as Prompt), currentVersionId: head.id },
       versions: [head],
     };
   }

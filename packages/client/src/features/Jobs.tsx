@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { GenerationJob, JobStatus } from '@h3/shared';
 import { api, ApiClientError } from '../api/client.js';
 import { useNav } from '../nav.js';
+import { newRequestId } from '../util.js';
 import { Badge, CenterState, ErrorBanner, Spinner } from '../components.js';
 
 const TERMINAL: JobStatus[] = ['succeeded', 'failed', 'expired'];
@@ -117,6 +118,7 @@ export function JobsList() {
 
 export function JobDetail({ jobId }: { jobId: string }) {
   const { go } = useNav();
+  const [retryToken, setRetryToken] = useState<string>(newRequestId);
   const [job, setJob] = useState<GenerationJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -158,11 +160,28 @@ export function JobDetail({ jobId }: { jobId: string }) {
   }, [jobId]);
 
   async function retry() {
+    if (retrying) return;
     setRetrying(true);
+    setError(null);
     try {
-      const result = await api.retryJob(jobId);
-      go({ name: 'job', jobId: result.job.id });
+      const result = await api.retryJob(jobId, retryToken);
+      // A response was observed: rotate the token so the next deliberate retry
+      // click is a new attempt (a fresh job), not a reuse of this one.
+      setRetryToken(newRequestId());
+      if (!result.reused || !TERMINAL.includes(result.job.status)) {
+        // A fresh (or still in-progress) job — navigate to it.
+        go({ name: 'job', jobId: result.job.id });
+      } else {
+        // This retry attempt already finished terminally (e.g. a transport retry
+        // that returned an already-failed retried job). Do NOT silently navigate
+        // to a stale failed job; surface it and let the user retry again.
+        setError(
+          `This retry already finished (${result.job.status}). Click retry to start a fresh job.`,
+        );
+      }
     } catch (e) {
+      // Outcome unknown or failed: KEEP the token so a resend reuses the same
+      // retried job (no double charge). Do not rotate here.
       setError(e instanceof ApiClientError ? e.message : 'Failed to retry job.');
     } finally {
       setRetrying(false);

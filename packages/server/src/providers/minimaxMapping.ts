@@ -147,29 +147,62 @@ export interface MappedQueryResult {
  * of always collapsing to `provider_failure`.
  *
  * MiniMax surfaces failure reason via `task.error.code` (a string/number) and/or
- * `task.error.message`. We map the known stable families (moderation, balance,
- * rate-limit, auth, invalid request) using the code plus message keywords, and
- * fall back to `provider_failure` for anything unrecognized.
+ * `task.error.message`. Classification is intentionally conservative to avoid
+ * false positives:
+ *  - Numeric/provider codes are matched EXACTLY (HTTP-style 400/401/402/422/429).
+ *    Bare numeric substrings are NEVER searched across the message, so a code of
+ *    `1027` with a message like "request 1422 timed out" is not misread as
+ *    moderation, and a message mentioning "4290ms" is not misread as rate
+ *    limiting.
+ *  - Keyword matching is applied to the MESSAGE ONLY (never to the code), so a
+ *    numeric code can never trip a keyword.
+ * Anything unrecognized falls back to `provider_failure`.
  */
+const NUMERIC_CODE_CATEGORY: Record<number, ProviderErrorCategory> = {
+  400: ProviderErrorCategory.INVALID_REQUEST,
+  401: ProviderErrorCategory.AUTH,
+  402: ProviderErrorCategory.INSUFFICIENT_BALANCE,
+  422: ProviderErrorCategory.CONTENT_MODERATION,
+  429: ProviderErrorCategory.RATE_LIMIT,
+};
+
+function classifyByExactCode(code: string | number | undefined): ProviderErrorCategory | undefined {
+  if (code === undefined) {
+    return undefined;
+  }
+  // Only an entirely-numeric code token is treated as an HTTP-style code, so a
+  // value like "1027" or "429" matches but "CONTENT_RISK" or "4290ms" never do.
+  const asString = typeof code === 'number' ? String(code) : code;
+  if (/^\d+$/.test(asString)) {
+    return NUMERIC_CODE_CATEGORY[Number(asString)];
+  }
+  return undefined;
+}
+
 export function classifyTaskFailureCategory(
   failure: { message: string; code?: string | number },
 ): ProviderErrorCategory {
-  const code = failure.code !== undefined ? String(failure.code) : '';
-  const text = `${code} ${failure.message}`.toLowerCase();
+  // 1. Exact numeric/provider-code match (no substring search).
+  const exact = classifyByExactCode(failure.code);
+  if (exact !== undefined) {
+    return exact;
+  }
 
-  if (/balance|credit|insufficient|payment|402/.test(text)) {
+  // 2. Keyword matching against the MESSAGE ONLY.
+  const message = (failure.message ?? '').toLowerCase();
+  if (/balance|credit|insufficient|payment/.test(message)) {
     return ProviderErrorCategory.INSUFFICIENT_BALANCE;
   }
-  if (/moderat|risk|sensitiv|content polic|not safe|safety|422/.test(text)) {
+  if (/moderat|risk|sensitiv|content polic|not safe|safety/.test(message)) {
     return ProviderErrorCategory.CONTENT_MODERATION;
   }
-  if (/rate|quota|too many|429/.test(text)) {
+  if (/rate|quota|too many|throttl/.test(message)) {
     return ProviderErrorCategory.RATE_LIMIT;
   }
-  if (/unauthor|invalid.*key|invalid.*token|auth|401/.test(text)) {
+  if (/unauthor|forbidden|invalid.*key|invalid.*token|auth/.test(message)) {
     return ProviderErrorCategory.AUTH;
   }
-  if (/invalid|bad request|malformed|400/.test(text)) {
+  if (/invalid|bad request|malformed/.test(message)) {
     return ProviderErrorCategory.INVALID_REQUEST;
   }
   return ProviderErrorCategory.PROVIDER_FAILURE;

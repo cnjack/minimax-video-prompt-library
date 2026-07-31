@@ -86,4 +86,38 @@ describe('MockProvider', () => {
     await mock.query(created.providerTaskId);
     expect((await mock.query(created.providerTaskId)).status).toBe('failed');
   });
+
+  it('assigns distinct collision-resistant prefixes per instance', async () => {
+    const a = new MockProvider();
+    const b = new MockProvider();
+    const aId = (await a.create(input('success'))).providerTaskId;
+    const bId = (await b.create(input('success'))).providerTaskId;
+    expect(aId).not.toBe(bId);
+  });
+
+  it('cannot collide with persisted task ids from a previous instance (restart-safe)', async () => {
+    // "Previous process" instance + a task left non-terminal (running).
+    const oldProvider = new MockProvider();
+    const oldCreated = await oldProvider.create(input('success'));
+    const oldTaskId = oldCreated.providerTaskId;
+    await oldProvider.query(oldTaskId); // -> running
+
+    // Restart: a brand-new instance gets a fresh collision-resistant prefix.
+    const newProvider = new MockProvider();
+    const newCreated = await newProvider.create(input('success'));
+    // The new task id must NOT collide with the old persisted one (no
+    // `mock-task-1` reuse that would map two jobs to one in-memory task).
+    expect(newCreated.providerTaskId).not.toBe(oldTaskId);
+
+    // The old persisted (non-terminal) task id is unknown to the new instance:
+    // it must resolve terminally (failed), NOT return the new task's result.
+    const stale = await newProvider.query(oldTaskId);
+    expect(stale.status).toBe('failed');
+    expect(stale.resultUrl).toBeUndefined();
+
+    // The new task still progresses deterministically.
+    expect((await newProvider.query(newCreated.providerTaskId)).status).toBe('running');
+    const done = await newProvider.query(newCreated.providerTaskId);
+    expect(done.status).toBe('succeeded');
+  });
 });

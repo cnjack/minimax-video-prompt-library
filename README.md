@@ -275,34 +275,54 @@ docker compose up --build
 # open http://localhost:3001
 ```
 
-SQLite data is persisted on the `h3-data` volume. To use the real provider with
-Compose, set `PROVIDER_MODE=minimax` and inject `MINIMAX_API_KEY` via your secret
-mechanism (not committed).
+The runtime image runs as a named, unprivileged user (`h3`, fixed UID/GID
+`10001`) that owns `/data`, so SQLite data is persisted on the `h3-data` volume
+and the process never runs as root. To use the real provider with Compose, set
+`PROVIDER_MODE=minimax` and inject `MINIMAX_API_KEY` via your secret mechanism
+(not committed).
+
+> The committed image tag is a **local convenience** (`h3-prompt-studio:latest`).
+> For production, build once, push to your registry, and deploy an **immutable**
+> reference — a specific tag or, preferably, a digest (`image:
+> registry.example.com/h3-prompt-studio@sha256:…`), overriding the Deployment
+> image via `kubectl set image` or a kustomize `images:` entry. Do not treat a
+> mutable `:latest` as production-ready.
 
 ---
 
 ## Kubernetes (namespace `jcode`)
 
-Manifests live in [`k8s/`](k8s/): Namespace, ConfigMap, Secret placeholder, PVC,
-Deployment (readiness/liveness probes, `Recreate` strategy for single-instance
-SQLite), and a ClusterIP Service.
+Manifests live in [`k8s/`](k8s/): Namespace, ConfigMap, PVC, Deployment
+(readiness/liveness probes, `Recreate` strategy for single-instance SQLite), and
+a ClusterIP Service. **No Secret is committed or applied** — see below.
+
+The Deployment is hardened: it runs as the same non-root UID/GID (`10001`) baked
+into the image, with `runAsNonRoot`, `allowPrivilegeEscalation: false`,
+`readOnlyRootFilesystem: true`, all Linux capabilities dropped, and the
+`RuntimeDefault` seccomp profile. The only writable path is the mounted `/data`
+PVC (SQLite + WAL); no `/tmp` emptyDir is needed.
 
 ```bash
-docker build -t h3-prompt-studio:latest .
-kubectl apply -k k8s/                       # or: kubectl apply -f k8s/
+docker build -t h3-prompt-studio:latest .   # for production, push an immutable tag/digest
+kubectl apply -k k8s/
 kubectl -n jcode rollout status deploy/h3-prompt-studio
 kubectl -n jcode port-forward svc/h3-prompt-studio 8080:80   # open http://localhost:8080
 ```
 
-Supply real credentials out-of-band:
+**Credentials are supplied out-of-band only** — there is deliberately no
+committed Secret, so `kubectl apply -k k8s/` can never overwrite an operator's
+real MiniMax key with a placeholder. In mock mode the Deployment's `secretRef` is
+`optional: true` and the pod starts with no secret present. For real mode:
 
 ```bash
 kubectl -n jcode create secret generic h3-prompt-studio-secrets \
   --from-literal=MINIMAX_API_KEY=sk-... -o yaml --dry-run=client | kubectl apply -f -
+# then set PROVIDER_MODE=minimax (e.g. patch the ConfigMap) and roll the Deployment.
 ```
 
-> **Note:** `secret.yaml` is an empty placeholder so the Deployment applies
-> cleanly in mock mode. Never commit a real key.
+> Never commit a real key. `kubectl apply -k k8s/` applies no Secret resource at
+> all.
+
 
 ---
 

@@ -7,6 +7,7 @@ import { VersionRepository } from '../db/repositories/versionRepo.js';
 import { MockProvider } from '../providers/mockProvider.js';
 import { MinimaxProvider } from '../providers/minimaxProvider.js';
 import type { FetchLike } from '../providers/minimaxTransport.js';
+import type { VideoProvider } from '../providers/types.js';
 import { JobPoller } from '../poller/poller.js';
 import { GenerationService } from '../services/generationService.js';
 import { PromptService } from '../services/promptService.js';
@@ -40,7 +41,7 @@ beforeEach(() => {
   const prompts = new PromptRepository(testDb.db);
   const versions = new VersionRepository(testDb.db);
   jobs = new JobRepository(testDb.db);
-  promptService = new PromptService(prompts, versions);
+  promptService = new PromptService(prompts, versions, testDb.db);
   mock = new MockProvider();
   generationService = new GenerationService(versions, jobs, mock, 'mock');
 });
@@ -291,5 +292,93 @@ describe('JobPoller: provider "succeeded" without a usable url', () => {
     expect(final?.errorCode).toBe('provider_failure');
     expect(final?.errorMessage).toMatch(/no usable result URL/i);
     expect(final?.completedAt).not.toBeNull();
+  });
+});
+
+describe('GenerationService error vocabulary', () => {
+  it('a non-ProviderError synchronous failure stores provider_failure (not provider_error)', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const throwingProvider = {
+      name: 'mock',
+      configured: true,
+      async create() {
+        throw new Error('unexpected boom');
+      },
+      async query() {
+        return { providerTaskId: 'x', status: 'running' as const };
+      },
+    } as unknown as VideoProvider;
+    const svc = new GenerationService(
+      new VersionRepository(testDb.db),
+      jobs,
+      throwingProvider,
+      'mock',
+    );
+    const result = await svc.create({
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+    });
+    expect(result.job.status).toBe('failed');
+    // Single vocabulary: the persisted error_code is the ProviderErrorCategory
+    // `provider_failure`, never the HTTP-envelope code `provider_error`.
+    expect(result.job.errorCode).toBe('provider_failure');
+  });
+});
+
+describe('JobPoller compare-and-set interleaving', () => {
+  it('a stale non-terminal poll result does not revive a terminal job', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const created = jobs.create({
+      id: 'job-interleave',
+      promptId: detail.prompt.id,
+      promptVersionId: detail.versions[0]!.id,
+      renderedPrompt: 'render cat',
+      model: 'MiniMax-H3',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'running',
+      provider: 'mock',
+      providerTaskId: 'task-interleave',
+      resultUrl: null,
+      errorCode: null,
+      errorMessage: null,
+      idempotencyKey: 'k-interleave',
+      idempotencyPayloadHash: 'h-interleave',
+      parameters: {},
+      now: nowIso(),
+    });
+
+    // A provider that, during the query round-trip, terminalizes the job (a
+    // concurrent writer), then returns a STALE non-terminal ('running') result.
+    const interleavingProvider = {
+      name: 'mock',
+      configured: true,
+      async create() {
+        return { providerTaskId: 'x', status: 'queued' as const };
+      },
+      async query() {
+        jobs.updateStatus(created.id, {
+          status: 'succeeded',
+          resultUrl: 'https://x/v.mp4',
+          now: nowIso(),
+        });
+        return { providerTaskId: created.providerTaskId!, status: 'running' as const };
+      },
+    } as unknown as VideoProvider;
+
+    const poller = new JobPoller(jobs, interleavingProvider, mockConfig);
+    await poller.tick();
+
+    // The stale 'running' result must not revive the now-succeeded job.
+    expect(jobs.getById(created.id)?.status).toBe('succeeded');
   });
 });

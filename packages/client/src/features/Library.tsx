@@ -8,6 +8,10 @@ import { Badge, CenterState, ErrorBanner, Spinner, Tag } from '../components.js'
 
 type StatusFilter = '' | 'draft' | 'active' | 'archived';
 
+/** Debounce window for text/filter changes so fast typing does not fire a
+ *  request per keystroke. */
+const SEARCH_DEBOUNCE_MS = 200;
+
 export function Library({ onNew }: { onNew: () => void }) {
   const { go } = useNav();
   const [items, setItems] = useState<Prompt[] | null>(null);
@@ -15,19 +19,40 @@ export function Library({ onNew }: { onNew: () => void }) {
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<StatusFilter>('');
 
-  async function load() {
-    setError(null);
-    try {
-      const res = await api.listPrompts({ q: q || undefined, status: status || undefined });
-      setItems(res.items);
-    } catch (e) {
-      setError(e instanceof ApiClientError ? e.message : 'Failed to load prompts.');
-      setItems([]);
-    }
-  }
-
+  // Debounced, abortable, stale-safe search. Each [q, status] change starts a
+  // fresh lifecycle:
+  //  - a timer debounces the request so rapid keystrokes coalesce;
+  //  - an AbortController cancels the superseded in-flight request;
+  //  - a `cancelled` flag (plus the aborted signal) ignores any straggler
+  //    response OR error from a previous query, so a late result for an old query
+  //    can never overwrite the current query's results or surface a stale error.
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const res = await api.listPrompts(
+            { q: q || undefined, status: status || undefined },
+            { signal: controller.signal },
+          );
+          if (cancelled || controller.signal.aborted) return;
+          setItems(res.items);
+          setError(null);
+        } catch (e) {
+          if (cancelled || controller.signal.aborted) return;
+          if (e instanceof DOMException && e.name === 'AbortError') return;
+          setError(e instanceof ApiClientError ? e.message : 'Failed to load prompts.');
+          setItems([]);
+        }
+      })();
+    }, SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearTimeout(timer);
+    };
   }, [q, status]);
 
   return (

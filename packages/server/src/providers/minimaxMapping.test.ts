@@ -149,13 +149,53 @@ describe('query response extractors (nested task envelope)', () => {
 });
 
 describe('classifyTaskFailureCategory (async task.error taxonomy)', () => {
-  it('classifies moderation signals as content_moderation', () => {
+  it('classifies moderation MESSAGE keywords as content_moderation', () => {
     expect(
-      classifyTaskFailureCategory({ message: 'flagged', code: 'CONTENT_RISK' }),
+      classifyTaskFailureCategory({ message: 'flagged by moderation' }),
     ).toBe(ProviderErrorCategory.CONTENT_MODERATION);
     expect(
       classifyTaskFailureCategory({ message: 'blocked by safety review' }),
     ).toBe(ProviderErrorCategory.CONTENT_MODERATION);
+  });
+
+  it('matches EXACT numeric codes only (no substring search across messages)', () => {
+    expect(
+      classifyTaskFailureCategory({ message: 'x', code: 400 }),
+    ).toBe(ProviderErrorCategory.INVALID_REQUEST);
+    expect(classifyTaskFailureCategory({ message: 'x', code: 401 })).toBe(
+      ProviderErrorCategory.AUTH,
+    );
+    expect(classifyTaskFailureCategory({ message: 'x', code: 402 })).toBe(
+      ProviderErrorCategory.INSUFFICIENT_BALANCE,
+    );
+    expect(classifyTaskFailureCategory({ message: 'x', code: 422 })).toBe(
+      ProviderErrorCategory.CONTENT_MODERATION,
+    );
+    expect(classifyTaskFailureCategory({ message: 'x', code: 429 })).toBe(
+      ProviderErrorCategory.RATE_LIMIT,
+    );
+    // Numeric codes may also arrive as strings.
+    expect(classifyTaskFailureCategory({ message: 'x', code: '429' })).toBe(
+      ProviderErrorCategory.RATE_LIMIT,
+    );
+  });
+
+  it('does not let numeric substrings in code or message drive classification', () => {
+    // code 1027 with a message containing "1422" is NOT moderation.
+    expect(
+      classifyTaskFailureCategory({
+        message: 'request 1422 timed out',
+        code: 1027,
+      }),
+    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
+    // a message mentioning "4290ms" is NOT rate limiting.
+    expect(
+      classifyTaskFailureCategory({ message: 'request took 4290ms', code: 'TIMEOUT' }),
+    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
+    // a numeric-looking string code that is not exactly a known code is not classified.
+    expect(classifyTaskFailureCategory({ message: 'x', code: '4290' })).toBe(
+      ProviderErrorCategory.PROVIDER_FAILURE,
+    );
   });
 
   it('classifies balance signals as insufficient_balance', () => {
@@ -215,13 +255,13 @@ describe('mapQueryResult', () => {
     expect(out.failure?.category).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
   });
 
-  it('classifies a failed task.error by its stable code instead of always provider_failure', () => {
+  it('classifies a failed task.error by message keyword instead of always provider_failure', () => {
     const out = mapQueryResult({
-      task: { status: 'failed', error: { message: 'blocked', code: 'SAFETY_RISK' } },
+      task: { status: 'failed', error: { message: 'blocked by safety review', code: 'SAFETY_RISK' } },
     });
     expect(out.status).toBe('failed');
     expect(out.failure?.category).toBe(ProviderErrorCategory.CONTENT_MODERATION);
-    expect(out.failure?.message).toBe('blocked');
+    expect(out.failure?.message).toBe('blocked by safety review');
   });
 
   it('maps a balance task.error to insufficient_balance', () => {

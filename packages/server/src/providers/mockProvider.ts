@@ -10,7 +10,7 @@
  * poller never spins forever.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ProviderErrorCategory } from '@h3/shared';
 import { ProviderError } from './types.js';
 import type {
@@ -74,6 +74,14 @@ export class MockProvider implements VideoProvider {
   private readonly tasks = new Map<string, MockTask>();
   private counter = 0;
   private defaultScenario: MockScenario = 'success';
+  /**
+   * Per-instance collision-resistant prefix. A fresh process/instance generates a
+   * new prefix, so task ids can never collide with task ids persisted by a
+   * previous (restarted) instance. This prevents an old persisted non-terminal
+   * job from polling a brand-new in-memory task and receiving the wrong result.
+   * State transitions and result URLs remain fully deterministic.
+   */
+  private readonly instancePrefix: string = randomUUID().slice(0, 8);
 
   /** Set the default scenario used for new mock jobs (mock-only endpoint). */
   setDefaultScenario(scenario: MockScenario): void {
@@ -100,7 +108,7 @@ export class MockProvider implements VideoProvider {
         401,
       );
     }
-    const providerTaskId = `mock-task-${++this.counter}`;
+    const providerTaskId = `mock-task-${this.instancePrefix}-${++this.counter}`;
     this.tasks.set(providerTaskId, {
       scenario,
       queries: 0,

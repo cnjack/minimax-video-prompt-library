@@ -34,6 +34,37 @@ function makePrompt(status: 'draft' | 'active' = 'active') {
   });
 }
 
+function baseJob(overrides: Record<string, unknown> = {}) {
+  const p = makePrompt();
+  const v = versions.create({ id: newId(), promptId: p.id, content: 'x', now: nowIso() });
+  return jobs.create({
+    id: newId(),
+    promptId: p.id,
+    promptVersionId: v.id,
+    renderedPrompt: 'rendered',
+    model: 'MiniMax-H3',
+    durationSeconds: 6,
+    aspectRatio: '16:9',
+    resolution: '2K',
+    firstFrameUrl: null,
+    lastFrameUrl: null,
+    referenceImageUrl: null,
+    referenceVideoUrl: null,
+    referenceAudioUrl: null,
+    status: 'queued',
+    provider: 'mock',
+    providerTaskId: null,
+    resultUrl: null,
+    errorCode: null,
+    errorMessage: null,
+    idempotencyKey: newId(),
+    idempotencyPayloadHash: 'hash-' + Math.random(),
+    parameters: {},
+    now: nowIso(),
+    ...overrides,
+  });
+}
+
 describe('PromptRepository', () => {
   it('creates and retrieves a prompt', () => {
     const p = makePrompt();
@@ -77,37 +108,6 @@ describe('VersionRepository', () => {
 });
 
 describe('JobRepository', () => {
-  function baseJob(overrides: Record<string, unknown> = {}) {
-    const p = makePrompt();
-    const v = versions.create({ id: newId(), promptId: p.id, content: 'x', now: nowIso() });
-    return jobs.create({
-      id: newId(),
-      promptId: p.id,
-      promptVersionId: v.id,
-      renderedPrompt: 'rendered',
-      model: 'MiniMax-H3',
-      durationSeconds: 6,
-      aspectRatio: '16:9',
-      resolution: '2K',
-      firstFrameUrl: null,
-      lastFrameUrl: null,
-      referenceImageUrl: null,
-      referenceVideoUrl: null,
-      referenceAudioUrl: null,
-      status: 'queued',
-      provider: 'mock',
-      providerTaskId: null,
-      resultUrl: null,
-      errorCode: null,
-      errorMessage: null,
-      idempotencyKey: newId(),
-      idempotencyPayloadHash: 'hash-' + Math.random(),
-      parameters: {},
-      now: nowIso(),
-      ...overrides,
-    });
-  }
-
   it('creates and retrieves a job', () => {
     const job = baseJob();
     expect(jobs.getById(job.id)?.status).toBe('queued');
@@ -130,9 +130,10 @@ describe('JobRepository', () => {
       resultUrl: 'https://x/v.mp4',
       now: nowIso(),
     });
-    expect(updated?.status).toBe('succeeded');
-    expect(updated?.resultUrl).toBe('https://x/v.mp4');
-    expect(updated?.completedAt).not.toBeNull();
+    expect(updated.job?.status).toBe('succeeded');
+    expect(updated.job?.resultUrl).toBe('https://x/v.mp4');
+    expect(updated.job?.completedAt).not.toBeNull();
+    expect(updated.lostUpdate).toBe(false);
   });
 
   it('lists only non-terminal jobs', () => {
@@ -166,5 +167,63 @@ describe('JobRepository', () => {
 
     // Idempotent: a second sweep recovers nothing.
     expect(jobs.recoverUnsubmitted(nowIso())).toHaveLength(0);
+  });
+});
+
+describe('JobRepository.updateStatus compare-and-set guard', () => {
+  it('refuses a non-terminal update on an already-terminal row (lostUpdate, unchanged)', () => {
+    const job = baseJob({ providerTaskId: 'pt' }); // queued
+    jobs.updateStatus(job.id, {
+      status: 'succeeded',
+      resultUrl: 'https://x/v.mp4',
+      now: nowIso(),
+    }); // -> terminal
+
+    // A stale non-terminal update must NOT revive the terminal row.
+    const outcome = jobs.updateStatus(job.id, { status: 'running', now: nowIso() });
+    expect(outcome.lostUpdate).toBe(true);
+    expect(outcome.job?.status).toBe('succeeded');
+    expect(outcome.job?.resultUrl).toBe('https://x/v.mp4');
+  });
+
+  it('applies a non-terminal update to a non-terminal row', () => {
+    const job = baseJob({ providerTaskId: 'pt' }); // queued
+    const outcome = jobs.updateStatus(job.id, { status: 'running', now: nowIso() });
+    expect(outcome.lostUpdate).toBe(false);
+    expect(outcome.job?.status).toBe('running');
+  });
+
+  it('still applies a terminal update to an already-terminal row (idempotent terminal)', () => {
+    const job = baseJob({ status: 'failed', providerTaskId: 'pt' });
+    const outcome = jobs.updateStatus(job.id, {
+      status: 'succeeded',
+      resultUrl: 'https://x/y.mp4',
+      now: nowIso(),
+    });
+    expect(outcome.lostUpdate).toBe(false);
+    expect(outcome.job?.status).toBe('succeeded');
+  });
+});
+
+describe('PromptRepository literal LIKE search', () => {
+  it('treats _ and % as literals (snake_case, 100%)', () => {
+    prompts.create({ id: newId(), name: 'snake_case', description: '', tags: ['snake_case'], status: 'active', now: nowIso() });
+    prompts.create({ id: newId(), name: 'snakeXcase', description: '', tags: [], status: 'active', now: nowIso() });
+    prompts.create({ id: newId(), name: '100% off', description: '', tags: ['100percent'], status: 'active', now: nowIso() });
+    prompts.create({ id: newId(), name: '1000 off', description: '', tags: [], status: 'active', now: nowIso() });
+
+    expect(prompts.list({ q: 'snake_case', limit: 50 }).map((p) => p.name)).toEqual(['snake_case']);
+    expect(prompts.list({ q: '100%', limit: 50 }).map((p) => p.name)).toEqual(['100% off']);
+    expect(prompts.list({ tag: 'snake_case', limit: 50 }).map((p) => p.name)).toEqual(['snake_case']);
+  });
+
+  it('treats a backslash as a literal with ESCAPE', () => {
+    prompts.create({ id: newId(), name: 'path\\to\\file', description: '', tags: [], status: 'active', now: nowIso() });
+    expect(prompts.list({ q: 'path\\to', limit: 50 }).map((p) => p.name)).toEqual(['path\\to\\file']);
+  });
+
+  it('still does plain substring search', () => {
+    prompts.create({ id: newId(), name: 'Cinematic Reveal', description: '', tags: [], status: 'active', now: nowIso() });
+    expect(prompts.list({ q: 'cinematic', limit: 50 })).toHaveLength(1);
   });
 });

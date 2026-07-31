@@ -205,45 +205,71 @@ export class JobRepository {
     return rows.map(mapRow);
   }
 
-  updateStatus(
-    id: string,
-    update: JobStatusUpdate,
-  ): GenerationJob | null {
+  /**
+   * Apply a status/field update with a compare-and-set guard.
+   *
+   * A NON-TERMINAL target status (queued/running) is only written when the row is
+   * itself non-terminal, so a stale poll (or any non-terminal write) can never
+   * revive an already-terminal (succeeded/failed/expired) row back to
+   * queued/running. Terminal target statuses are always applied (re-asserting a
+   * terminal state is idempotent).
+   *
+   * Returns the resulting row plus a `lostUpdate` flag that is true when a
+   * non-terminal update was refused because the row was already terminal (the
+   * returned `job` is then the unchanged terminal row). Callers (the poller) must
+   * treat `lostUpdate` as a safe no-op rather than overwriting state.
+   */
+  updateStatus(id: string, update: JobStatusUpdate): UpdateStatusOutcome {
     const setClauses: string[] = ['updated_at = ?'];
-    const params: SqlBind = [update.now];
+    const setParams: SqlBind = [update.now];
     if (update.status !== undefined) {
       setClauses.push('status = ?');
-      params.push(update.status);
+      setParams.push(update.status);
     }
     if (update.providerTaskId !== undefined) {
       setClauses.push('provider_task_id = ?');
-      params.push(update.providerTaskId);
+      setParams.push(update.providerTaskId);
     }
     if (update.resultUrl !== undefined) {
       setClauses.push('result_url = ?');
-      params.push(update.resultUrl);
+      setParams.push(update.resultUrl);
     }
     if (update.errorCode !== undefined) {
       setClauses.push('error_code = ?');
-      params.push(update.errorCode);
+      setParams.push(update.errorCode);
     }
     if (update.errorMessage !== undefined) {
       setClauses.push('error_message = ?');
-      params.push(update.errorMessage);
+      setParams.push(update.errorMessage);
     }
     const isTerminal =
-      update.status && TERMINAL_STATUSES.includes(update.status);
+      update.status !== undefined && TERMINAL_STATUSES.includes(update.status);
     if (isTerminal) {
       setClauses.push('completed_at = ?');
-      params.push(update.now);
+      setParams.push(update.now);
     }
-    params.push(id);
-    this.db
+
+    // Compare-and-set guard: a non-terminal target only applies to a row that is
+    // currently non-terminal. This prevents a stale non-terminal update from
+    // moving an already-terminal row back to queued/running.
+    const targetIsNonTerminal =
+      update.status !== undefined && !TERMINAL_STATUSES.includes(update.status);
+    const guardClause = targetIsNonTerminal
+      ? ` AND status NOT IN (${TERMINAL_STATUSES.map(() => '?').join(', ')})`
+      : '';
+    const guardParams: SqlBind = targetIsNonTerminal ? [...TERMINAL_STATUSES] : [];
+
+    const info = this.db
       .prepare(
-        `UPDATE generation_jobs SET ${setClauses.join(', ')} WHERE id = ?`,
+        `UPDATE generation_jobs SET ${setClauses.join(', ')} WHERE id = ?${guardClause}`,
       )
-      .run(...params);
-    return this.getById(id);
+      // Placeholder order matches the SQL: SET params, then the row id, then the
+      // CAS guard params (terminal statuses).
+      .run(...setParams, id, ...guardParams) as { changes?: number };
+
+    const row = this.getById(id);
+    const lostUpdate = targetIsNonTerminal && (info.changes ?? 1) === 0;
+    return { job: row, lostUpdate };
   }
 
   /** Reset transient-failure attempt counters (stored on the job row params). */
@@ -306,4 +332,15 @@ export interface JobStatusUpdate {
   errorCode?: string | null;
   errorMessage?: string | null;
   now: string;
+}
+
+/**
+ * Outcome of a compare-and-set {@link JobRepository.updateStatus}.
+ *  - `job`: the row as it exists after the attempted update (null if not found).
+ *  - `lostUpdate`: true when a non-terminal update was refused because the row
+ *    was already terminal; `job` is then the unchanged terminal row.
+ */
+export interface UpdateStatusOutcome {
+  job: GenerationJob | null;
+  lostUpdate: boolean;
 }

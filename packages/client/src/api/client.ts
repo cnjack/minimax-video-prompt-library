@@ -47,6 +47,8 @@ interface RequestOptions {
   method: string;
   body?: unknown;
   query?: Record<string, string | undefined>;
+  /** Extra request headers (e.g. a per-attempt Idempotency-Key). */
+  headers?: Record<string, string>;
   /** Optional abort signal so callers can cancel in-flight requests. */
   signal?: AbortSignal;
 }
@@ -63,23 +65,44 @@ async function request<T>(path: string, options: RequestOptions): Promise<T> {
       ).toString()}`
     : path;
 
+  const headers: Record<string, string> = options.headers ?? {};
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+  }
+
   const response = await fetch(url, {
     method: options.method,
-    headers:
-      options.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     signal: options.signal,
   });
 
   const text = await response.text();
-  const parsed = text.length > 0 ? (JSON.parse(text) as unknown) : undefined;
+  // Tolerate non-JSON bodies without leaking a raw SyntaxError. A parse failure
+  // becomes a structured ApiClientError carrying the status and request id.
+  let parsed: unknown;
+  let parseFailed = false;
+  if (text.length > 0) {
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+      parseFailed = true;
+    }
+  } else {
+    parsed = undefined;
+  }
 
-  if (!response.ok) {
-    const errorBody = (parsed as { error?: ApiErrorBody } | undefined)?.error;
+  if (!response.ok || parseFailed) {
+    const errorBody = !parseFailed
+      ? (parsed as { error?: ApiErrorBody } | undefined)?.error
+      : undefined;
     throw new ApiClientError(
       errorBody ?? {
         code: 'internal_error',
-        message: `Request failed with status ${response.status}.`,
+        message: parseFailed
+          ? `Received a non-JSON response with status ${response.status}.`
+          : `Request failed with status ${response.status}.`,
         status: response.status,
         requestId: response.headers.get('x-request-id') ?? 'unknown',
       },
@@ -90,7 +113,10 @@ async function request<T>(path: string, options: RequestOptions): Promise<T> {
 
 export const api = {
   // Prompts
-  listPrompts(query: Partial<ListPromptsQuery> = {}): Promise<ListResponse<Prompt>> {
+  listPrompts(
+    query: Partial<ListPromptsQuery> = {},
+    options: ReadOptions = {},
+  ): Promise<ListResponse<Prompt>> {
     return request('/api/prompts', {
       method: 'GET',
       query: {
@@ -99,6 +125,7 @@ export const api = {
         tag: query.tag,
         limit: query.limit?.toString(),
       },
+      signal: options.signal,
     });
   },
   createPrompt(body: CreatePromptRequest): Promise<PromptDetail> {
@@ -154,8 +181,11 @@ export const api = {
   getJob(id: string): Promise<GenerationJob> {
     return request(`/api/generations/${id}`, { method: 'GET' });
   },
-  retryJob(id: string): Promise<CreateGenerationResponse> {
-    return request(`/api/generations/${id}/retry`, { method: 'POST' });
+  retryJob(id: string, idempotencyKey: string): Promise<CreateGenerationResponse> {
+    return request(`/api/generations/${id}/retry`, {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+    });
   },
 
   // Health + mock scenario control

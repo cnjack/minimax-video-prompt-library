@@ -4,6 +4,7 @@ import { Router } from 'express';
 import { createGenerationSchema, listJobsQuerySchema } from '@h3/shared';
 import type { AppServices } from '../services/container.js';
 import { asyncHandler, parseBody, routeParam } from '../middleware/asyncHandler.js';
+import { IDEMPOTENCY_KEY_HEADER, readIdempotencyKey } from '../middleware/idempotency.js';
 
 export function createJobsRouter(services: AppServices): Router {
   const router = Router();
@@ -41,9 +42,13 @@ export function createJobsRouter(services: AppServices): Router {
   router.post(
     '/:id/retry',
     asyncHandler(async (req, res) => {
-      // Idempotent: a network retry reuses the existing retried job (derived
-      // `retry:<id>` key) and returns 200; the first attempt creates (201).
-      const result = await services.generations.retry(routeParam(req, 'id'));
+      // Retry idempotency is driven by an explicit per-attempt Idempotency-Key
+      // header (one token per user click). The same token reused while the HTTP
+      // outcome is unknown reuses the retried job (200); a fresh token creates a
+      // new job (201). This keeps transport retries safe without permanently
+      // mapping every retry of a source to the first retried job.
+      const idempotencyKey = readIdempotencyKey(req.header(IDEMPOTENCY_KEY_HEADER));
+      const result = await services.generations.retry(routeParam(req, 'id'), idempotencyKey);
       res.status(result.reused ? 200 : 201).json(result);
     }),
   );

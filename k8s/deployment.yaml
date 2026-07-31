@@ -17,14 +17,35 @@ spec:
       labels:
         app.kubernetes.io/name: h3-prompt-studio
     spec:
+      # Pod-level security: run as the same non-root UID/GID baked into the image
+      # (10001), never root, and apply the default seccomp profile.
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: h3-prompt-studio
+          # Local convenience tag for development. For production, override this
+          # with an IMMUTABLE registry reference (a specific tag or, ideally, a
+          # digest) via `kubectl set image` or a kustomize `images:` entry — do
+          # not treat a mutable `:latest` as production-ready.
           image: h3-prompt-studio:latest
           imagePullPolicy: IfNotPresent
+          # Container hardening: no privilege escalation, a read-only root
+          # filesystem, all Linux capabilities dropped. The only writable path is
+          # the mounted /data volume (SQLite + WAL), so no /tmp emptyDir is added.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: http
               containerPort: 3001
@@ -32,7 +53,12 @@ spec:
             - configMapRef:
                 name: h3-prompt-studio-config
             - secretRef:
+                # Optional: in mock mode no secret exists and the pod still
+                # starts. For real mode, create this secret out-of-band (see
+                # README) — it is NEVER committed, so `kubectl apply -k` can never
+                # overwrite an operator's real credential with a placeholder.
                 name: h3-prompt-studio-secrets
+                optional: true
           env:
             - name: NODE_OPTIONS
               value: "--experimental-sqlite --disable-warning=ExperimentalWarning"

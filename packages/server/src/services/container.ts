@@ -32,7 +32,7 @@ export function createAppServices(
   const jobs = new JobRepository(db);
 
   return {
-    prompts: new PromptService(prompts, versions),
+    prompts: new PromptService(prompts, versions, db),
     generations: new GenerationService(versions, jobs, provider, providerMode),
     providerName: providerMode,
     mockProvider: isMockProvider(provider) ? provider : null,

@@ -60,6 +60,20 @@ export interface UpdatePromptInput {
   now: string;
 }
 
+/**
+ * Escape SQLite LIKE metacharacters so a search term matches LITERALLY:
+ * backslash (the escape char), `%`, and `_` are escaped, and the SQL declares
+ * `ESCAPE '\u005c'`. Replacing metacharacters with spaces (the old behavior)
+ * broke searches for values like `snake_case` or `100%`.
+ */
+function escapeLikeLiteral(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
+// SQL fragment declaring the LIKE escape character (a single backslash) so the
+// escaped pattern values match `%`, `_`, and `\` literally.
+const LIKE_ESCAPE = "'\\'";
+
 export class PromptRepository {
   constructor(private readonly db: DB) {}
 
@@ -105,12 +119,17 @@ export class PromptRepository {
       params.push(query.status);
     }
     if (query.tag) {
-      where.push('tags LIKE ?');
-      params.push(`%"${query.tag.replace(/[%_"]/g, ' ')}"%`);
+      // Match a JSON-array tag literally: the stored tags column is a JSON array
+      // like ["snake_case","100%"], so surround the escaped tag with quote
+      // delimiters and escape LIKE metacharacters.
+      where.push(`tags LIKE ? ESCAPE ${LIKE_ESCAPE}`);
+      params.push(`%"${escapeLikeLiteral(query.tag)}"%`);
     }
     if (query.q) {
-      where.push('(name LIKE ? OR description LIKE ? OR tags LIKE ?)');
-      const term = `%${query.q.replace(/[%_]/g, ' ')}%`;
+      const term = `%${escapeLikeLiteral(query.q)}%`;
+      where.push(
+        `(name LIKE ? ESCAPE ${LIKE_ESCAPE} OR description LIKE ? ESCAPE ${LIKE_ESCAPE} OR tags LIKE ? ESCAPE ${LIKE_ESCAPE})`,
+      );
       params.push(term, term, term);
     }
 

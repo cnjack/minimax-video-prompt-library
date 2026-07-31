@@ -87,7 +87,16 @@ export class JobPoller {
         update.errorCode = null;
         update.errorMessage = null;
       }
-      this.jobs.updateStatus(jobId, update);
+      const outcome = this.jobs.updateStatus(jobId, update);
+      // Compare-and-set: if the row became terminal between the poll listing
+      // and this update, a non-terminal result (e.g. a stale "running") was
+      // refused. Treat that as a safe no-op rather than reviving a terminal job.
+      if (outcome.lostUpdate) {
+        this.log(
+          'warn',
+          `Job ${jobId} was already terminal; ignored stale ${result.status} poll update.`,
+        );
+      }
     } catch (error) {
       const attempts = (this.failures.get(jobId) ?? 0) + 1;
       this.failures.set(jobId, attempts);

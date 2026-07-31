@@ -145,12 +145,12 @@ describe('MinimaxProvider', () => {
     expect(out.resultUrl).toBeUndefined();
   });
 
-  it('classifies an async task.error by its code (not always provider_failure)', async () => {
+  it('classifies an async task.error by message keyword (not always provider_failure)', async () => {
     const provider = makeProvider(
       fakeFetch({
         status: 200,
         body: {
-          task: { status: 'failed', error: { message: 'blocked', code: 'SAFETY' } },
+          task: { status: 'failed', error: { message: 'blocked by safety review', code: 'SAFETY' } },
         },
       }),
     );

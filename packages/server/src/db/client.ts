@@ -38,3 +38,29 @@ export function openDatabase(dbPath: string, options: OpenDbOptions = {}): DB {
   db.exec('PRAGMA synchronous = NORMAL;');
   return db;
 }
+
+/**
+ * Run `fn` inside a single SQLite transaction (BEGIN … COMMIT). If `fn` (or the
+ * COMMIT) throws, the transaction is rolled back. If the rollback ITSELF fails,
+ * the ORIGINAL error is preserved and re-thrown — the rollback failure is never
+ * allowed to mask the cause of the abort.
+ *
+ * SQLite (via `node:sqlite`) serializes writes on a single connection, so this
+ * is safe for this single-instance PoC.
+ */
+export function runInTransaction<T>(db: DB, fn: () => T): T {
+  db.exec('BEGIN');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    // Attempt rollback but never let it mask the original error.
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // Swallow rollback failure; the original error is re-thrown below.
+    }
+    throw error;
+  }
+}

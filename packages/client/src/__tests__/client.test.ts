@@ -75,3 +75,60 @@ describe('api client', () => {
     expect(url).toContain('limit=5');
   });
 });
+
+describe('api client non-JSON transport hardening', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('turns a non-JSON error response into ApiClientError (never a raw SyntaxError)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response('<html>Bad Gateway</html>', {
+          status: 502,
+          headers: { 'content-type': 'text/html', 'x-request-id': 'rid-502' },
+        }),
+      ),
+    );
+    await expect(api.getPrompt('x')).rejects.toMatchObject({
+      code: 'internal_error',
+      status: 502,
+      requestId: 'rid-502',
+    });
+    try {
+      await api.getPrompt('x');
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(ApiClientError);
+      expect(e).not.toBeInstanceOf(SyntaxError);
+      expect((e as ApiClientError).message).toMatch(/non-JSON/i);
+    }
+  });
+
+  it('turns a non-JSON successful response into ApiClientError', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response('OK', { status: 200, headers: { 'content-type': 'text/plain' } }),
+      ),
+    );
+    await expect(api.getHealth()).rejects.toBeInstanceOf(ApiClientError);
+  });
+
+  it('still parses a successful JSON response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ status: 'ok', mode: 'mock', providerConfigured: true, timestamp: 't' }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+      ),
+    );
+    const h = await api.getHealth();
+    expect(h.mode).toBe('mock');
+  });
+});

@@ -35,6 +35,15 @@ COPY --from=build /app/packages/shared/dist ./packages/shared/dist
 COPY --from=build /app/packages/server/dist ./packages/server/dist
 COPY --from=build /app/packages/client/dist ./packages/client/dist
 
+# Run as a named, unprivileged, fixed UID/GID that owns the persisted data dir.
+# UID/GID 10001 avoids clashing with the image's `node` user (1000) and is the
+# same identity used by the Kubernetes manifests.
+RUN groupadd --system --gid 10001 h3 && \
+    useradd --system --uid 10001 --gid 10001 --no-create-home \
+      --home-dir /app --shell /usr/sbin/nologin h3 && \
+    mkdir -p /data && \
+    chown -R h3:h3 /data /app
+
 ENV NODE_ENV=production \
     PORT=3001 \
     DB_PATH=/data/h3-studio.db \
@@ -46,5 +55,6 @@ ENV NODE_ENV=production \
 
 EXPOSE 3001
 # Migrations run on startup; the in-process poller advances non-terminal jobs.
+USER 10001:10001
 WORKDIR /app/packages/server
 CMD ["node", "dist/server.js"]

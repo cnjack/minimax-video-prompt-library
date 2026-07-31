@@ -130,7 +130,13 @@ export function runMigrations(db: DB, migrations: Migration[] = MIGRATIONS): {
     }
     db.exec('COMMIT');
   } catch (error) {
-    db.exec('ROLLBACK');
+    // Roll back the partial migration, but never let a rollback failure mask the
+    // original error that caused the abort.
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // Swallow rollback failure; the original error is re-thrown below.
+    }
     throw error;
   }
 

@@ -7,6 +7,7 @@ import { MockProvider } from '../providers/mockProvider.js';
 import { JobPoller } from '../poller/poller.js';
 import { createAppServices } from '../services/container.js';
 import { createApp } from '../app.js';
+import { nowIso } from '../util.js';
 
 let testDb: TestDb;
 let app: ReturnType<typeof createApp>;
@@ -268,46 +269,118 @@ describe('aspect ratio / frame mode API rejection', () => {
   });
 });
 
-describe('retry idempotency', () => {
-  it('POST /:id/retry is idempotent across repeated calls (one new job, second reused)', async () => {
+describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
+  function plantFailedJob(promptId: string, versionId: string, id: string, params: Record<string, unknown>) {
+    return jobs.create({
+      id,
+      promptId,
+      promptVersionId: versionId,
+      renderedPrompt: 'x',
+      model: 'MiniMax-H3',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'failed',
+      provider: 'mock',
+      providerTaskId: null,
+      resultUrl: null,
+      errorCode: 'provider_failure',
+      errorMessage: 'boom',
+      idempotencyKey: `src-${id}`,
+      idempotencyPayloadHash: `h-${id}`,
+      parameters: params,
+      now: nowIso(),
+    });
+  }
+
+  it('same token reuses; a new token creates a distinct job', async () => {
     const created = await request(app)
       .post('/api/prompts')
       .send({ name: 'P', content: 'x' })
       .expect(201);
+    const promptId = created.body.prompt.id as string;
     const versionId = created.body.versions[0].id as string;
+    const failed = plantFailedJob(promptId, versionId, 'src-failed', {
+      values: {},
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      mockScenario: 'success',
+    });
 
-    // A job that fails immediately at submission (provider_error scenario).
-    const failed = await request(app)
-      .post('/api/generations')
-      .send({
-        promptVersionId: versionId,
-        values: {},
-        durationSeconds: 5,
-        aspectRatio: '16:9',
-        resolution: '2K',
-        mockScenario: 'provider_error',
-      })
-      .expect(201);
-    expect(failed.body.job.status).toBe('failed');
-    const failedId = failed.body.job.id as string;
-
-    // First retry creates a new job (201).
+    // First retry with token T1 creates a new queued job (201).
     const r1 = await request(app)
-      .post(`/api/generations/${failedId}/retry`)
+      .post(`/api/generations/${failed.id}/retry`)
+      .set('Idempotency-Key', 'T1')
       .expect(201);
+    expect(r1.body.job.status).toBe('queued');
     const retriedId = r1.body.job.id as string;
-    expect(retriedId).not.toBe(failedId);
 
-    // A network retry of the same POST reuses the retried job (200) — no second
-    // paid generation.
+    // A transport retry carrying the SAME token reuses the retried job (200).
     const r2 = await request(app)
-      .post(`/api/generations/${failedId}/retry`)
+      .post(`/api/generations/${failed.id}/retry`)
+      .set('Idempotency-Key', 'T1')
       .expect(200);
     expect(r2.body.reused).toBe(true);
     expect(r2.body.job.id).toBe(retriedId);
 
-    // Exactly two jobs: the failed source + one retry.
+    // A deliberate retry with a NEW token creates a distinct job (201).
+    const r3 = await request(app)
+      .post(`/api/generations/${failed.id}/retry`)
+      .set('Idempotency-Key', 'T2')
+      .expect(201);
+    expect(r3.body.reused).toBe(false);
+    expect(r3.body.job.id).not.toBe(retriedId);
+
+    // Exactly three jobs: source + two distinct retries.
     const history = await request(app).get('/api/generations').expect(200);
-    expect(history.body.total).toBe(2);
+    expect(history.body.total).toBe(3);
+  });
+
+  it('rejects an invalid Idempotency-Key header with 400 and creates nothing', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    const failed = plantFailedJob(
+      created.body.prompt.id,
+      created.body.versions[0].id,
+      'src-failed-bad',
+      { values: {}, durationSeconds: 5, aspectRatio: '16:9', resolution: '2K', mockScenario: 'success' },
+    );
+    // A header containing a space is not a valid bounded token.
+    const bad = await request(app)
+      .post(`/api/generations/${failed.id}/retry`)
+      .set('Idempotency-Key', 'bad key');
+    expect(bad.status).toBe(400);
+    expect(bad.body.error.code).toBe('bad_request');
+    expect(jobs.list({ limit: 100 })).toHaveLength(1);
+  });
+
+  it('returns 422 UNPROCESSABLE when the stored params are corrupt (no provider request)', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    // Corrupt persisted params: an unsupported aspect ratio and missing duration.
+    const failed = plantFailedJob(
+      created.body.prompt.id,
+      created.body.versions[0].id,
+      'src-failed-corrupt',
+      { values: {}, aspectRatio: 'bogus', resolution: '2K' },
+    );
+
+    const res = await request(app)
+      .post(`/api/generations/${failed.id}/retry`)
+      .set('Idempotency-Key', 'T-corrupt');
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('unprocessable');
+    // No new job was created (only the corrupt source remains).
+    expect(jobs.list({ limit: 100 })).toHaveLength(1);
   });
 });

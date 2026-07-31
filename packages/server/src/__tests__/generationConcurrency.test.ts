@@ -47,7 +47,7 @@ beforeEach(() => {
   const prompts = new PromptRepository(testDb.db);
   const versions = new VersionRepository(testDb.db);
   jobs = new JobRepository(testDb.db);
-  promptService = new PromptService(prompts, versions);
+  promptService = new PromptService(prompts, versions, testDb.db);
 });
 
 afterEach(() => {
@@ -265,7 +265,7 @@ describe('idempotency under concurrency', () => {
   });
 });
 
-describe('retry idempotency (derived retry:<id> key)', () => {
+describe('retry idempotency (per-attempt Idempotency-Key token)', () => {
   let versionId: string;
   let promptId: string;
   let provider: VideoProvider & { creates: number };
@@ -330,14 +330,15 @@ describe('retry idempotency (derived retry:<id> key)', () => {
     });
   });
 
-  it('repeated retries of the same source reuse ONE retried job (one provider call)', async () => {
-    const r1 = await generationService.retry(failedJob.id);
+  it('the SAME token reuses one retried job (transport retry does not double-charge)', async () => {
+    const r1 = await generationService.retry(failedJob.id, 'retry-token-same');
     expect(r1.reused).toBe(false);
     expect(r1.job.status).toBe('queued');
     const retriedId = r1.job.id;
 
-    // A network retry of the same POST must reuse, never create a second job.
-    const r2 = await generationService.retry(failedJob.id);
+    // A transport retry of the same POST carries the SAME token and reuses the
+    // retried job — never a second paid generation.
+    const r2 = await generationService.retry(failedJob.id, 'retry-token-same');
     expect(r2.reused).toBe(true);
     expect(r2.job.id).toBe(retriedId);
 
@@ -347,11 +348,27 @@ describe('retry idempotency (derived retry:<id> key)', () => {
     expect(jobs.list({ limit: 100 })).toHaveLength(2);
   });
 
-  it('concurrent retries of the same source create exactly ONE retried job (no double charge)', async () => {
+  it('a NEW token after a retry creates a DISTINCT job (deliberate retry creates C)', async () => {
+    // First deliberate retry of the source with token A.
+    const r1 = await generationService.retry(failedJob.id, 'token-A');
+    // A later deliberate retry of the SAME source supplies a NEW token (B) and
+    // must create a distinct job — the old derived `retry:<id>` key reused the
+    // first retried job forever.
+    const r2 = await generationService.retry(failedJob.id, 'token-B');
+    expect(r1.reused).toBe(false);
+    expect(r2.reused).toBe(false);
+    expect(r1.job.id).not.toBe(r2.job.id);
+    expect(provider.creates).toBe(2);
+    // Source + two distinct retried jobs.
+    expect(jobs.list({ limit: 100 })).toHaveLength(3);
+  });
+
+  it('concurrent retries with the SAME token create exactly ONE retried job (no double charge)', async () => {
+    const token = 'retry-token-concurrent';
     const results = await Promise.all([
-      generationService.retry(failedJob.id),
-      generationService.retry(failedJob.id),
-      generationService.retry(failedJob.id),
+      generationService.retry(failedJob.id, token),
+      generationService.retry(failedJob.id, token),
+      generationService.retry(failedJob.id, token),
     ]);
     expect(provider.creates).toBe(1);
     expect(jobs.list({ limit: 100 })).toHaveLength(2);
@@ -361,7 +378,7 @@ describe('retry idempotency (derived retry:<id> key)', () => {
     expect(results.every((r) => r.job.id === created!.job.id)).toBe(true);
   });
 
-  it('retrying a DIFFERENT source job derives a different key and creates a distinct job', async () => {
+  it('retrying a DIFFERENT source job creates a distinct job', async () => {
     // A second failed source job.
     const other = jobs.create({
       id: 'orig-failed-2',
@@ -395,8 +412,8 @@ describe('retry idempotency (derived retry:<id> key)', () => {
       now: '2024-01-01T00:00:00Z',
     });
 
-    const r1 = await generationService.retry(failedJob.id);
-    const r2 = await generationService.retry(other.id);
+    const r1 = await generationService.retry(failedJob.id, 'src-1-token');
+    const r2 = await generationService.retry(other.id, 'src-2-token');
     expect(r1.job.id).not.toBe(r2.job.id);
     expect(provider.creates).toBe(2);
     // Two sources + two distinct retried jobs.
@@ -405,14 +422,51 @@ describe('retry idempotency (derived retry:<id> key)', () => {
 });
 
 describe('util: isUniqueConstraintError', () => {
-  it('detects a SQLite UNIQUE constraint message', async () => {
+  it('detects a SQLite UNIQUE constraint message and rejects non-unique constraints', async () => {
     const { isUniqueConstraintError } = await import('../util.js');
     expect(
       isUniqueConstraintError(
         new Error('UNIQUE constraint failed: generation_jobs.idempotency_key'),
       ),
     ).toBe(true);
+    // Non-unique constraint violations must NOT be misreported as an idempotency
+    // reuse — only UNIQUE (and PRIMARY KEY) conflicts qualify.
+    expect(
+      isUniqueConstraintError(new Error('NOT NULL constraint failed: prompts.name')),
+    ).toBe(false);
+    expect(
+      isUniqueConstraintError(new Error('CHECK constraint failed: generation_jobs.status')),
+    ).toBe(false);
+    expect(
+      isUniqueConstraintError(new Error('FOREIGN KEY constraint failed: child.parent')),
+    ).toBe(false);
     expect(isUniqueConstraintError(new Error('no such table'))).toBe(false);
     expect(isUniqueConstraintError(null)).toBe(false);
+  });
+
+  it('recognizes the real UNIQUE/PK extended errcode but not NOT NULL/CHECK codes', async () => {
+    const { isUniqueConstraintError } = await import('../util.js');
+    const unique = new Error('UNIQUE constraint failed: t.idem') as Error & {
+      errcode?: number;
+    };
+    unique.errcode = 2067; // SQLITE_CONSTRAINT_UNIQUE
+    expect(isUniqueConstraintError(unique)).toBe(true);
+
+    const notNull = new Error('NOT NULL constraint failed') as Error & {
+      errcode?: number;
+    };
+    notNull.errcode = 1299; // SQLITE_CONSTRAINT_NOTNULL
+    expect(isUniqueConstraintError(notNull)).toBe(false);
+
+    const check = new Error('CHECK constraint failed') as Error & {
+      errcode?: number;
+    };
+    check.errcode = 275; // SQLITE_CONSTRAINT_CHECK
+    expect(isUniqueConstraintError(check)).toBe(false);
+
+    // The generic primary code 19 must never be treated as a UNIQUE race.
+    const generic = new Error('constraint') as Error & { errcode?: number };
+    generic.errcode = 19;
+    expect(isUniqueConstraintError(generic)).toBe(false);
   });
 });

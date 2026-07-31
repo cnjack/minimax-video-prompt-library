@@ -5,5 +5,9 @@ coverage
 *.db-shm
 *.db-wal
 .git
+# Never copy real environment files into the image. Exclude every .env variant
+# while still allowing the committed .env.example template through.
 .env
+.env.*
+!.env.example
 *.tsbuildinfo

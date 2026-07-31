@@ -13,6 +13,11 @@ export function newId(): string {
 /**
  * Stable hash of the generation inputs so idempotency can detect a same-key,
  * different-payload conflict. Keys are sorted for canonical comparison.
+ *
+ * Ordering is locale-independent UTF-16 code-unit comparison (NOT
+ * `String.prototype.localeCompare`, which is collator/locale-dependent and can
+ * order keys differently across environments, silently changing the hash for the
+ * same logical payload). Code-unit ordering is deterministic everywhere.
  */
 export function computePayloadHash(input: {
   promptVersionId: string;
@@ -43,27 +48,42 @@ export function computePayloadHash(input: {
   return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
 }
 
-function sortRecord(record: Record<string, string>): Record<string, string> {
+/**
+ * Sort object keys by UTF-16 code unit (locale-independent, deterministic).
+ * Exported for testing the ordering contract directly.
+ */
+export function sortRecord(record: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(record).sort(([a], [b]) => a.localeCompare(b)),
+    Object.entries(record).sort(([a], [b]) => compareCodeUnits(a, b)),
   );
+}
+
+/** Locale-independent comparison by UTF-16 code units. */
+export function compareCodeUnits(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
 }
 
 /**
  * Detect a SQLite UNIQUE-constraint violation thrown by `node:sqlite`.
  *
- * `node:sqlite` exposes the SQLite extended error code as `errcode`:
- * 19 = SQLITE_CONSTRAINT, 2067 = SQLITE_CONSTRAINT_UNIQUE. We treat either as a
- * unique race (belt-and-braces with the English message SQLite emits).
+ * `node:sqlite` exposes the SQLite EXTENDED result code as `errcode`:
+ *  - 2067 = SQLITE_CONSTRAINT_UNIQUE
+ *  - 1555 = SQLITE_CONSTRAINT_PRIMARYKEY (also surfaces as a uniqueness race)
+ * The primary code 19 (SQLITE_CONSTRAINT) is deliberately NOT treated as unique,
+ * because it also covers NOT NULL (1299), FOREIGN KEY (787), and CHECK (275)
+ * failures — those must never be misreported as an idempotency reuse. The English
+ * message is matched narrowly ("UNIQUE constraint failed") as a belt-and-braces
+ * fallback for fakes/environments that omit the numeric code.
  */
+const UNIQUE_ERRCODES = new Set<number>([2067, 1555]);
+
 export function isUniqueConstraintError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
   const anyError = error as Error & { errcode?: unknown };
-  const errcode =
-    typeof anyError.errcode === 'number' ? anyError.errcode : undefined;
-  if (errcode === 2067 || errcode === 19) {
+  if (typeof anyError.errcode === 'number' && UNIQUE_ERRCODES.has(anyError.errcode)) {
     return true;
   }
   return /unique constraint failed/i.test(error.message);

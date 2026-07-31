@@ -1,18 +1,44 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import type { GenerationJob } from '@h3/shared';
 import { NavProvider } from '../nav.js';
-import { JobsList } from './Jobs.js';
+import { JobDetail, JobsList } from './Jobs.js';
 
-vi.mock('../api/client.js', () => ({
-  api: { listJobs: vi.fn() },
-  ApiClientError: class extends Error {},
+const { goSpy } = vi.hoisted(() => ({ goSpy: vi.fn() }));
+
+vi.mock('../nav.js', () => ({
+  // Passthrough provider; useNav returns a spy so navigation calls are observable.
+  NavProvider: ({ children }: { children: ReactNode }) => children,
+  useNav: () => ({ go: goSpy }),
 }));
 
-import { api } from '../api/client.js';
+vi.mock('../api/client.js', () => ({
+  api: {
+    listJobs: vi.fn(),
+    getJob: vi.fn(),
+    retryJob: vi.fn(),
+  },
+  ApiClientError: class extends Error {
+    readonly code: string;
+    readonly status: number;
+    readonly requestId: string;
+    constructor(body: { message: string; code: string; status: number; requestId: string }) {
+      super(body.message);
+      this.name = 'ApiClientError';
+      this.code = body.code;
+      this.status = body.status;
+      this.requestId = body.requestId;
+    }
+  },
+}));
+
+import { api, ApiClientError } from '../api/client.js';
 
 const listJobs = vi.mocked(api.listJobs);
+const getJob = vi.mocked(api.getJob);
+const retryJob = vi.mocked(api.retryJob);
 
 function makeJob(o: Partial<GenerationJob> & { id: string }): GenerationJob {
   const defaults: GenerationJob = {
@@ -138,5 +164,78 @@ describe('JobsList filter cancellation', () => {
     // The aborted "all" request must not surface as a user-facing error.
     expect(screen.queryByText(/Failed to load jobs/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/21:9/)).not.toBeInTheDocument();
+  });
+});
+
+describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
+  function renderDetail(jobId: string) {
+    return render(
+      <NavProvider>
+        <JobDetail jobId={jobId} />
+      </NavProvider>,
+    );
+  }
+
+  beforeEach(() => {
+    listJobs.mockReset();
+    getJob.mockReset();
+    retryJob.mockReset();
+    goSpy.mockReset();
+  });
+
+  it('sends a per-attempt token and retains it across a failed outcome (resend reuses it)', async () => {
+    getJob.mockResolvedValue(makeJob({ id: 'j1', status: 'failed' }));
+    retryJob.mockRejectedValue(
+      new ApiClientError({
+        code: 'internal_error',
+        message: 'boom',
+        status: 500,
+        requestId: 'r1',
+      }),
+    );
+    const user = userEvent.setup();
+    renderDetail('j1');
+    const btn = await screen.findByRole('button', { name: /Retry as new job/i });
+
+    await user.click(btn);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
+    const token1 = retryJob.mock.calls[0]![1];
+    expect(token1).toBeTruthy();
+    // The failure surfaces and the component stays on the (still-failed) job.
+    await waitFor(() => expect(screen.getByText(/boom/i)).toBeInTheDocument());
+
+    // A second click reuses the SAME token (outcome was unknown → retained).
+    await user.click(btn);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(2));
+    expect(retryJob.mock.calls[1]![1]).toBe(token1);
+  });
+
+  it('navigates to a fresh (non-reused) retried job', async () => {
+    getJob.mockResolvedValue(makeJob({ id: 'j1', status: 'failed' }));
+    retryJob.mockResolvedValue({ job: makeJob({ id: 'j2', status: 'queued' }), reused: false });
+    const user = userEvent.setup();
+    renderDetail('j1');
+    const btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    await user.click(btn);
+    await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
+    // A fresh (non-reused) retry navigates to the new job's detail view.
+    await waitFor(() =>
+      expect(goSpy).toHaveBeenCalledWith({ name: 'job', jobId: 'j2' }),
+    );
+  });
+
+  it('does not silently navigate to a stale terminal reused job', async () => {
+    getJob.mockResolvedValue(makeJob({ id: 'j1', status: 'failed' }));
+    // The retry returns a reused job that is ALREADY terminal (stale).
+    retryJob.mockResolvedValue({ job: makeJob({ id: 'old-retry', status: 'failed' }), reused: true });
+    const user = userEvent.setup();
+    renderDetail('j1');
+    const btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    await user.click(btn);
+    // Instead of navigating to the stale failed job, it surfaces a message and
+    // stays on the current job (no navigation; the retry button is still present).
+    await waitFor(() => expect(screen.getByText(/already finished/i)).toBeInTheDocument());
+    expect(goSpy).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Retry as new job/i })).toBeInTheDocument();
   });
 });

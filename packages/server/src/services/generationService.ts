@@ -6,10 +6,11 @@
  */
 
 import {
-  categoryToErrorCode,
+  createGenerationSchema,
   ErrorCode,
   H3_MAX_PROMPT_CHARS,
   H3_MODEL,
+  ProviderErrorCategory,
   renderTemplate,
   TemplateSyntaxError,
   UnresolvedVariableError,
@@ -20,7 +21,8 @@ import {
 import type { JobRepository } from '../db/repositories/jobRepo.js';
 import type { VersionRepository } from '../db/repositories/versionRepo.js';
 import { ApiError } from '../errors.js';
-import type { VideoProvider, ProviderError, MockScenario } from '../providers/types.js';
+import { ProviderError } from '../providers/types.js';
+import type { MockScenario, VideoProvider } from '../providers/types.js';
 import { computePayloadHash, isUniqueConstraintError, newId, nowIso } from '../util.js';
 
 export interface CreateGenerationResult {
@@ -175,7 +177,7 @@ export class GenerationService {
         resultUrl: created.resultUrl ?? null,
         now: nowIso(),
       });
-      return { job: updated ?? job, reused: false };
+      return { job: updated.job ?? job, reused: false };
     } catch (error) {
       const failure = this.toFailure(error);
       const updated = this.jobs.updateStatus(job.id, {
@@ -184,21 +186,31 @@ export class GenerationService {
         errorMessage: failure.message,
         now: nowIso(),
       });
-      return { job: updated ?? job, reused: false };
+      return { job: updated.job ?? job, reused: false };
     }
   }
 
   /**
    * Retry a failed/expired job as a brand-new job (history stays truthful).
    *
-   * Idempotency: the retry key is derived deterministically from the source job
-   * id (`retry:<id>`) and threaded into `create`, so a network retry of this
-   * POST can never create a second paid generation — it reuses the same retried
-   * job. Reusing an existing retried job preserves the same create-vs-conflict
-   * semantics as the create endpoint. Retrying a DIFFERENT (e.g. the already
-   * retried) job derives a different key and so still yields a fresh job.
+   * Idempotency is driven by an explicit per-attempt idempotency token supplied
+   * by the caller (the client generates one token per button click). The token is
+   * the idempotency key for the new job:
+   *  - the SAME token reused while the HTTP outcome is unknown (e.g. a transport
+   *    retry of the POST) resolves to the SAME retried job — never a second paid
+   *    generation;
+   *  - once the client observes a response it rotates the token, so a LATER
+   *    deliberate retry of the same source supplies a NEW token and creates a
+   *    distinct job.
+   * This replaces the old derived `retry:<id>` key, which permanently mapped
+   * every future retry of a source to the first retried job.
+   *
+   * The persisted generation parameters are re-validated against the shared
+   * generation schema before resubmitting; a corrupt or legacy-incomplete row is
+   * rejected with 422/UNPROCESSABLE rather than building an invalid provider
+   * request.
    */
-  async retry(jobId: string): Promise<CreateGenerationResult> {
+  async retry(jobId: string, idempotencyKey: string): Promise<CreateGenerationResult> {
     const original = this.requireJob(jobId);
     if (original.status !== 'failed' && original.status !== 'expired') {
       throw new ApiError(
@@ -207,32 +219,67 @@ export class GenerationService {
         { status: 422 },
       );
     }
-    const params = original.parameters as {
-      values: Record<string, string>;
-      durationSeconds: number;
-      aspectRatio: string;
-      resolution: string;
-      firstFrameUrl?: string;
-      lastFrameUrl?: string;
-      referenceImageUrl?: string;
-      referenceVideoUrl?: string;
-      referenceAudioUrl?: string;
+
+    const request = this.buildRetryRequest(original, idempotencyKey);
+    const parsed = createGenerationSchema.safeParse(request);
+    if (!parsed.success) {
+      throw new ApiError(
+        ErrorCode.UNPROCESSABLE,
+        'The stored generation parameters for this job are invalid or incomplete ' +
+          'and cannot be retried. Submit a new generation instead.',
+        {
+          status: 422,
+          details: {
+            issues: parsed.error.issues.map((i) => ({
+              path: i.path,
+              message: i.message,
+            })),
+          },
+        },
+      );
+    }
+    return this.create(parsed.data);
+  }
+
+  /**
+   * Reconstruct a generation request from a job's persisted parameters plus the
+   * caller-supplied per-attempt idempotency token. Nullable media URLs are mapped
+   * back to `undefined` and an absent mock scenario is omitted so the request
+   * round-trips through the shared schema.
+   */
+  private buildRetryRequest(
+    original: GenerationJob,
+    idempotencyKey: string,
+  ): CreateGenerationRequest {
+    const p = original.parameters as {
+      values?: Record<string, string>;
+      durationSeconds?: number;
+      aspectRatio?: string;
+      resolution?: string;
+      firstFrameUrl?: string | null;
+      lastFrameUrl?: string | null;
+      referenceImageUrl?: string | null;
+      referenceVideoUrl?: string | null;
+      referenceAudioUrl?: string | null;
       mockScenario?: MockScenario;
     };
-    return this.create({
+    const request: Record<string, unknown> = {
       promptVersionId: original.promptVersionId,
-      values: params.values ?? {},
-      durationSeconds: params.durationSeconds,
-      aspectRatio: params.aspectRatio as CreateGenerationRequest['aspectRatio'],
-      resolution: params.resolution as CreateGenerationRequest['resolution'],
-      firstFrameUrl: params.firstFrameUrl,
-      lastFrameUrl: params.lastFrameUrl,
-      referenceImageUrl: params.referenceImageUrl,
-      referenceVideoUrl: params.referenceVideoUrl,
-      referenceAudioUrl: params.referenceAudioUrl,
-      mockScenario: params.mockScenario,
-      idempotencyKey: `retry:${original.id}`,
-    });
+      values: p.values ?? {},
+      durationSeconds: p.durationSeconds,
+      aspectRatio: p.aspectRatio,
+      resolution: p.resolution,
+      firstFrameUrl: p.firstFrameUrl ?? undefined,
+      lastFrameUrl: p.lastFrameUrl ?? undefined,
+      referenceImageUrl: p.referenceImageUrl ?? undefined,
+      referenceVideoUrl: p.referenceVideoUrl ?? undefined,
+      referenceAudioUrl: p.referenceAudioUrl ?? undefined,
+      idempotencyKey,
+    };
+    if (p.mockScenario) {
+      request.mockScenario = p.mockScenario;
+    }
+    return request as CreateGenerationRequest;
   }
 
   getById(id: string): GenerationJob {
@@ -267,16 +314,22 @@ export class GenerationService {
     }
   }
 
-  private toFailure(error: unknown): { category: string; message: string } {
-    if (error instanceof Error && 'category' in error) {
-      const providerError = error as ProviderError;
-      return {
-        category: providerError.category,
-        message: providerError.message,
-      };
+  /**
+   * Translate a submission error into a single, consistent error vocabulary: a
+   * `ProviderErrorCategory` value (stored on `generation_jobs.error_code`). A
+   * non-ProviderError (unknown synchronous failure) maps to
+   * `provider_failure` — never the HTTP-envelope code `provider_error`, so the
+   * persisted column always holds a ProviderErrorCategory.
+   */
+  private toFailure(error: unknown): {
+    category: ProviderErrorCategory;
+    message: string;
+  } {
+    if (error instanceof ProviderError) {
+      return { category: error.category, message: error.message };
     }
     return {
-      category: categoryToErrorCode('provider_failure'),
+      category: ProviderErrorCategory.PROVIDER_FAILURE,
       message: 'Generation failed for an unknown reason.',
     };
   }
