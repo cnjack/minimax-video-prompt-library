@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NavProvider } from '../nav.js';
 import { Composer } from './Composer.js';
@@ -126,5 +126,103 @@ describe('Composer', () => {
     await waitFor(() =>
       expect(screen.getByText(/Content rejected/i)).toBeInTheDocument(),
     );
+  });
+});
+
+describe('Composer camera-movement preset chips', () => {
+  it('renders the six presets as keyboard-reachable buttons with names', async () => {
+    renderComposer();
+    await waitFor(() => expect(screen.getByLabelText('subject')).toBeInTheDocument());
+
+    const group = screen.getByRole('group', { name: /camera movement presets/i });
+    const chips = within(group).getAllByRole('button');
+    expect(chips).toHaveLength(6);
+    // Each chip is a real <button> (keyboard reachable) with a meaningful name.
+    expect(chips.map((c) => c.textContent)).toEqual([
+      'Pan left',
+      'Pan right',
+      'Push in',
+      'Pull out',
+      'Tracking shot',
+      'Static shot',
+    ]);
+    for (const chip of chips) {
+      expect(chip.tagName).toBe('BUTTON');
+      expect(chip).toHaveAttribute('type', 'button');
+    }
+  });
+
+  it('appends a camera cue at the end when the cursor has not been placed', async () => {
+    const user = userEvent.setup();
+    renderComposer();
+    await user.type(await screen.findByLabelText('subject'), 'a car');
+    await user.click(screen.getByRole('button', { name: 'Pan left' }));
+
+    const prompt = screen.getByLabelText('Rendered prompt') as HTMLTextAreaElement;
+    expect(prompt.value).toBe('A film of a car pan left');
+  });
+
+  it('inserts a camera cue at the cursor in the middle of the prompt', async () => {
+    renderComposer();
+    await userEvent.type(await screen.findByLabelText('subject'), 'a car');
+
+    const prompt = screen.getByLabelText('Rendered prompt') as HTMLTextAreaElement;
+    prompt.focus();
+    prompt.setSelectionRange(6, 6); // caret after "A film"
+    fireEvent.click(screen.getByRole('button', { name: 'Tracking shot' }));
+
+    expect(prompt.value).toBe('A film tracking shot of a car');
+  });
+
+  it('replaces the current selection with the camera cue', async () => {
+    renderComposer();
+    await userEvent.type(await screen.findByLabelText('subject'), 'a car');
+
+    const prompt = screen.getByLabelText('Rendered prompt') as HTMLTextAreaElement;
+    prompt.focus();
+    prompt.setSelectionRange(0, 6); // select "A film"
+    fireEvent.click(screen.getByRole('button', { name: 'Static shot' }));
+
+    expect(prompt.value).toBe('static shot of a car');
+  });
+
+  it('preserves surrounding text across multiple consecutive cues', async () => {
+    renderComposer();
+    await userEvent.type(await screen.findByLabelText('subject'), 'a car');
+
+    const prompt = screen.getByLabelText('Rendered prompt') as HTMLTextAreaElement;
+    prompt.focus();
+    prompt.setSelectionRange(6, 6); // after "A film"
+    fireEvent.click(screen.getByRole('button', { name: 'Pan left' }));
+    // After an insert the caret sits right after the inserted token, so a second
+    // cue is added directly after it without clobbering the rest of the prompt.
+    fireEvent.click(screen.getByRole('button', { name: 'Push in' }));
+
+    expect(prompt.value).toBe('A film pan left push in of a car');
+  });
+
+  it('sends the cue-augmented prompt as the generated prompt', async () => {
+    const user = userEvent.setup();
+    createGeneration.mockResolvedValue({ job: { id: 'job-1' }, reused: false });
+    renderComposer();
+    await user.type(await screen.findByLabelText('subject'), 'a car');
+    await user.click(screen.getByRole('button', { name: 'Push in' }));
+    await user.click(screen.getByRole('button', { name: /Generate video/i }));
+
+    await waitFor(() => expect(createGeneration).toHaveBeenCalledTimes(1));
+    const payload = createGeneration.mock.calls[0]![0] as { prompt: string };
+    expect(payload.prompt).toBe('A film of a car push in');
+  });
+
+  it('reset restores the freshly rendered prompt', async () => {
+    renderComposer();
+    await userEvent.type(await screen.findByLabelText('subject'), 'a car');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pan left' }));
+    const prompt = screen.getByLabelText('Rendered prompt') as HTMLTextAreaElement;
+    expect(prompt.value).toBe('A film of a car pan left');
+
+    fireEvent.click(screen.getByRole('button', { name: /reset to rendered/i }));
+    expect(prompt.value).toBe('A film of a car');
   });
 });

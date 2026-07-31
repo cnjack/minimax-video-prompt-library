@@ -22,6 +22,8 @@ export function newId(): string {
 export function computePayloadHash(input: {
   promptVersionId: string;
   values: Record<string, string>;
+  /** Rendered-prompt override (e.g. with inserted camera cues). */
+  prompt?: string;
   durationSeconds: number;
   aspectRatio: string;
   resolution: string;
@@ -36,6 +38,7 @@ export function computePayloadHash(input: {
     durationSeconds: input.durationSeconds,
     aspectRatio: input.aspectRatio,
     resolution: input.resolution,
+    prompt: input.prompt ?? '',
     values: sortRecord(input.values),
     urls: sortRecord({
       firstFrameUrl: input.firstFrameUrl ?? '',

@@ -275,6 +275,37 @@ button {
   font-size: 12px;
 }
 
+/* Camera-movement preset chips (insert a cue into the prompt at the cursor) */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+.chip {
+  appearance: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 5px 13px;
+  transition: filter 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.chip:hover {
+  filter: brightness(1.12);
+  border-color: var(--accent);
+}
+.chip:active {
+  transform: translateY(1px);
+}
+.chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* Badges */
 .badge {
   font-size: 11px;

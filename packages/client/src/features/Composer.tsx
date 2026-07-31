@@ -1,8 +1,15 @@
 /** Generation composer: render variables, pick H3 parameters, and submit a
- * protected generation request. Launched from a prompt version. */
+ * protected generation request. Launched from a prompt version.
+ *
+ * The composer also offers H3 camera-movement preset chips (see
+ * `@h3/shared` `cameraPresets`). Activating a chip inserts the preset's token at
+ * the current prompt cursor without disturbing the surrounding text. The edited
+ * prompt is sent as a rendered-prompt override so it is still validated through
+ * the existing H3 request policy (character limit etc.) before submission. */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CAMERA_PRESETS,
   findMissingVariables,
   H3_ADAPTIVE_RATIO,
   H3_CONCRETE_RATIOS,
@@ -10,9 +17,11 @@ import {
   H3_MIN_DURATION_SECONDS,
   H3_RATIOS,
   H3_RESOLUTION,
+  insertTokenAtSelection,
   mediaMode,
   renderTemplate,
   UnresolvedVariableError,
+  type CameraPreset,
   type ProviderName,
 } from '@h3/shared';
 import type { CreateGenerationRequest } from '@h3/shared';
@@ -38,6 +47,19 @@ export function Composer({
   const [content, setContent] = useState('');
   const [variables, setVariables] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
+
+  // Editable rendered prompt. While the user has not touched it, it mirrors the
+  // rendered template (so filling a variable live-updates it). Once a camera cue
+  // is inserted or the text is hand-edited, it is frozen as the source of truth
+  // so surrounding edits and inserted tokens are preserved.
+  const [promptOverride, setPromptOverride] = useState('');
+  const [promptTouched, setPromptTouched] = useState(false);
+  const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  // True once the user has focused/placed the cursor in the prompt; before that,
+  // a chip appends at the end rather than at an uninitialized (0) cursor.
+  const promptInteractedRef = useRef(false);
+  // Restored to the DOM after a chip insert so the caret lands after the token.
+  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
 
   const [duration, setDuration] = useState(6);
   const [aspectRatio, setAspectRatio] = useState<string>(H3_CONCRETE_RATIOS[0]);
@@ -87,15 +109,37 @@ export function Composer({
     [content, values],
   );
 
-  const preview = useMemo(() => {
+  // Rendered template (variables substituted). Shown editable in the UI and sent
+  // as the prompt override. Separated from `missing` so a render error (e.g. an
+  // unresolved variable) does not also disable other derived state.
+  const rendered = useMemo<{ text: string | null; error: string | null }>(() => {
     try {
-      return renderTemplate(content, values);
+      return { text: renderTemplate(content, values), error: null };
     } catch (e) {
-      return e instanceof UnresolvedVariableError
-        ? `Missing variable: ${e.variable}`
-        : 'Preview unavailable.';
+      const msg =
+        e instanceof UnresolvedVariableError
+          ? `Missing variable: ${e.variable}`
+          : 'Preview unavailable.';
+      return { text: null, error: msg };
     }
   }, [content, values]);
+
+  // The prompt the user actually sees and submits. Untouched → live render;
+  // touched → the frozen, possibly cue-augmented override.
+  const effectivePrompt = promptTouched ? promptOverride : (rendered.text ?? '');
+
+  // Restore the caret to the end of an inserted token once the new value is in
+  // the DOM. Only acts immediately after a chip insert (pendingSelection set).
+  useEffect(() => {
+    const el = promptRef.current;
+    const sel = pendingSelectionRef.current;
+    if (el && sel) {
+      el.selectionStart = sel.start;
+      el.selectionEnd = sel.end;
+      pendingSelectionRef.current = null;
+      el.focus();
+    }
+  }, [effectivePrompt]);
 
   // Conditional H3 ratio behavior, exposed honestly in the UI:
   //  - text-to-video requires a concrete ratio;
@@ -121,6 +165,26 @@ export function Composer({
 
   const canSubmit = missing.length === 0 && !submitting;
 
+  function insertCameraPreset(preset: CameraPreset) {
+    const el = promptRef.current;
+    const text = effectivePrompt;
+    // Before the user has placed the cursor, append at the end (intuitive
+    // default) instead of an uninitialized 0 cursor.
+    const fallback = text.length;
+    const start = el && promptInteractedRef.current ? el.selectionStart : fallback;
+    const end = el && promptInteractedRef.current ? el.selectionEnd : fallback;
+    const result = insertTokenAtSelection(text, start, end, preset.token);
+    pendingSelectionRef.current = { start: result.selectionStart, end: result.selectionEnd };
+    setPromptOverride(result.text);
+    setPromptTouched(true);
+  }
+
+  function resetPrompt() {
+    setPromptTouched(false);
+    setPromptOverride('');
+    promptInteractedRef.current = false;
+  }
+
   async function submit() {
     if (!canSubmit) return;
     setSubmitting(true);
@@ -128,6 +192,9 @@ export function Composer({
     const body: CreateGenerationRequest = {
       promptVersionId: versionId,
       values,
+      // The rendered prompt (with any inserted camera cues) is the exact text
+      // generated. The server still enforces the H3 character limit on it.
+      prompt: effectivePrompt,
       durationSeconds: duration,
       aspectRatio: effectiveRatio as CreateGenerationRequest['aspectRatio'],
       resolution: H3_RESOLUTION,
@@ -220,20 +287,65 @@ export function Composer({
           </div>
 
           <div className="card">
-            <div className="section-title">Rendered prompt</div>
-            <pre
-              className="mono"
-              style={{
-                whiteSpace: 'pre-wrap',
-                margin: 0,
-                background: 'var(--bg-elev)',
-                padding: 12,
-                borderRadius: 8,
-                border: '1px solid var(--border)',
-              }}
+            <div className="row between">
+              <div className="section-title" style={{ margin: 0 }}>
+                Prompt
+              </div>
+              {promptTouched ? (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  onClick={resetPrompt}
+                  title="Replace the prompt with the freshly rendered template"
+                >
+                  Reset to rendered
+                </button>
+              ) : null}
+            </div>
+
+            <div
+              className="chips"
+              role="group"
+              aria-label="Camera movement presets"
             >
-              {preview}
-            </pre>
+              {CAMERA_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className="chip"
+                  onClick={() => insertCameraPreset(preset)}
+                  title={preset.description}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+
+            <Field
+              label="Rendered prompt"
+              htmlFor="c-prompt"
+              hint="Camera cues insert at the cursor. This exact text is generated and still validated before submission."
+            >
+              <textarea
+                id="c-prompt"
+                ref={promptRef}
+                value={effectivePrompt}
+                placeholder="Fill in the variables to render the prompt…"
+                onChange={(e) => {
+                  setPromptOverride(e.target.value);
+                  setPromptTouched(true);
+                  promptInteractedRef.current = true;
+                }}
+                onFocus={() => {
+                  promptInteractedRef.current = true;
+                }}
+                onSelect={() => {
+                  promptInteractedRef.current = true;
+                }}
+                style={{ minHeight: 150 }}
+              />
+            </Field>
+            {rendered.error ? <ErrorBanner message={rendered.error} /> : null}
           </div>
         </div>
 

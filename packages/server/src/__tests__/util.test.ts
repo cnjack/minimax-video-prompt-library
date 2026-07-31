@@ -40,6 +40,12 @@ describe('computePayloadHash determinism (locale-independent code-unit ordering)
       computePayloadHash({ ...base, values: { a: '2' } }),
     );
   });
+
+  it('produces different hashes for different prompt overrides', () => {
+    expect(
+      computePayloadHash({ ...base, values: { a: '1' }, prompt: 'pan left' }),
+    ).not.toBe(computePayloadHash({ ...base, values: { a: '1' }, prompt: 'push in' }));
+  });
 });
 
 describe('compareCodeUnits / sortRecord', () => {

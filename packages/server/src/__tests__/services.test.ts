@@ -273,6 +273,74 @@ describe('GenerationService idempotency', () => {
   });
 });
 
+describe('GenerationService prompt override (camera cues)', () => {
+  it('uses the supplied prompt verbatim instead of rendering the version', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const result = await generationService.create({
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      prompt: 'a cat, tracking shot',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+    });
+    expect(result.job.renderedPrompt).toBe('a cat, tracking shot');
+  });
+
+  it('still enforces the H3 char limit on the supplied prompt before submission', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    await expect(
+      generationService.create({
+        promptVersionId: detail.versions[0]!.id,
+        values: {},
+        prompt: 'x'.repeat(7001),
+        durationSeconds: 5,
+        aspectRatio: '16:9',
+        resolution: '2K',
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.VALIDATION_ERROR, status: 400 });
+    // No job row created (enforced before persistence).
+    expect(jobs.list({ limit: 100 })).toHaveLength(0);
+  });
+
+  it('treats a blank prompt override as absent and renders from the version', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const result = await generationService.create({
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      prompt: '   ',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+    });
+    expect(result.job.renderedPrompt).toBe('render cat');
+  });
+
+  it('distinguishes jobs by the supplied prompt text for idempotency', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const base = {
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      durationSeconds: 5,
+      aspectRatio: '16:9' as const,
+      resolution: '2K' as const,
+      idempotencyKey: 'k-prompt',
+    };
+    const first = await generationService.create({ ...base, prompt: 'pan left' });
+    expect(first.job.renderedPrompt).toBe('pan left');
+
+    // Same key, different prompt text -> conflict (not reuse).
+    await expect(
+      generationService.create({ ...base, prompt: 'push in' }),
+    ).rejects.toMatchObject({ code: ErrorCode.IDEMPOTENCY_CONFLICT });
+
+    // Same key, same prompt text -> reuse.
+    const reused = await generationService.create({ ...base, prompt: 'pan left' });
+    expect(reused.reused).toBe(true);
+    expect(reused.job.id).toBe(first.job.id);
+  });
+});
+
 describe('JobPoller lifecycle', () => {
   it('advances a queued job to succeeded across ticks', async () => {
     const detail = createPromptWithContent('render {{subject}}');
