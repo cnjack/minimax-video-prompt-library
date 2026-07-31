@@ -32,6 +32,19 @@ import { Badge, ErrorBanner, Field, Spinner } from '../components.js';
 
 const MOCK_SCENARIOS = ['success', 'failure', 'expired', 'provider_error', 'slow'] as const;
 
+/**
+ * Deterministic serialization of the variable values so a touched prompt can
+ * detect when later variable edits made its frozen text stale. Keys are sorted
+ * by UTF-16 code unit (locale-independent) so insertion order never affects the
+ * comparison.
+ */
+function snapshotValues(values: Record<string, string>): string {
+  return Object.keys(values)
+    .sort()
+    .map((key) => `${key}=${values[key] ?? ''}`)
+    .join('\n');
+}
+
 export function Composer({
   promptId,
   versionId,
@@ -54,6 +67,11 @@ export function Composer({
   // so surrounding edits and inserted tokens are preserved.
   const [promptOverride, setPromptOverride] = useState('');
   const [promptTouched, setPromptTouched] = useState(false);
+  // Snapshot of `values` captured when the override was first frozen. Once the
+  // prompt is touched, later variable edits make `values` diverge from the text
+  // actually generated; that staleness blocks submission until the user re-syncs
+  // via "Reset to rendered".
+  const [promptOverrideValues, setPromptOverrideValues] = useState('');
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   // True once the user has focused/placed the cursor in the prompt; before that,
   // a chip appends at the end rather than at an uninitialized (0) cursor.
@@ -128,6 +146,16 @@ export function Composer({
   // touched → the frozen, possibly cue-augmented override.
   const effectivePrompt = promptTouched ? promptOverride : (rendered.text ?? '');
 
+  // The recorded `values` must stay consistent with the generated prompt text.
+  // A touched prompt is "stale" when the variables changed after it was frozen,
+  // which would otherwise submit prompt text that no longer matches the recorded
+  // values. Detected by comparing the live values to the frozen snapshot.
+  const promptStale =
+    promptTouched && promptOverrideValues !== snapshotValues(values);
+  // Chips are blocked while variables are unresolved (they would freeze the
+  // prompt to only the camera token) and while the prompt is stale.
+  const chipsDisabled = missing.length > 0 || promptStale;
+
   // Restore the caret to the end of an inserted token once the new value is in
   // the DOM. Only acts immediately after a chip insert (pendingSelection set).
   useEffect(() => {
@@ -163,7 +191,7 @@ export function Composer({
     return { mode: m, ratios, effectiveRatio: ratio };
   }, [firstFrame, lastFrame, refImage, refVideo, refAudio, aspectRatio]);
 
-  const canSubmit = missing.length === 0 && !submitting;
+  const canSubmit = missing.length === 0 && !promptStale && !submitting;
 
   function insertCameraPreset(preset: CameraPreset) {
     const el = promptRef.current;
@@ -176,12 +204,19 @@ export function Composer({
     const result = insertTokenAtSelection(text, start, end, preset.token);
     pendingSelectionRef.current = { start: result.selectionStart, end: result.selectionEnd };
     setPromptOverride(result.text);
-    setPromptTouched(true);
+    // Freeze the prompt and record the values that produced it ONLY at the
+    // untouched→touched transition. A later variable edit then diverges from
+    // this snapshot and is flagged stale until the user re-syncs.
+    if (!promptTouched) {
+      setPromptTouched(true);
+      setPromptOverrideValues(snapshotValues(values));
+    }
   }
 
   function resetPrompt() {
     setPromptTouched(false);
     setPromptOverride('');
+    setPromptOverrideValues('');
     promptInteractedRef.current = false;
   }
 
@@ -314,10 +349,28 @@ export function Composer({
                   type="button"
                   className="chip"
                   onClick={() => insertCameraPreset(preset)}
+                  // The motion is also exposed to assistive tech via
+                  // aria-describedby (below), not the title tooltip alone.
                   title={preset.description}
+                  aria-describedby={`c-chip-desc-${preset.id}`}
+                  disabled={chipsDisabled}
                 >
                   {preset.label}
                 </button>
+              ))}
+              {missing.length > 0 ? (
+                <span className="chip-hint">
+                  Available once all variables are filled.
+                </span>
+              ) : null}
+            </div>
+            {/* Visually-hidden descriptions referenced by aria-describedby so the
+                motion each chip inserts is announced, not only shown on hover. */}
+            <div className="visually-hidden">
+              {CAMERA_PRESETS.map((preset) => (
+                <span key={preset.id} id={`c-chip-desc-${preset.id}`}>
+                  {preset.description}
+                </span>
               ))}
             </div>
 
@@ -333,7 +386,10 @@ export function Composer({
                 placeholder="Fill in the variables to render the prompt…"
                 onChange={(e) => {
                   setPromptOverride(e.target.value);
-                  setPromptTouched(true);
+                  if (!promptTouched) {
+                    setPromptTouched(true);
+                    setPromptOverrideValues(snapshotValues(values));
+                  }
                   promptInteractedRef.current = true;
                 }}
                 onFocus={() => {
@@ -346,6 +402,9 @@ export function Composer({
               />
             </Field>
             {rendered.error ? <ErrorBanner message={rendered.error} /> : null}
+            {promptStale ? (
+              <ErrorBanner message="The prompt was edited after a variable changed, so its text no longer matches the recorded values. Reset to rendered to re-sync, then re-apply any camera cues." />
+            ) : null}
           </div>
         </div>
 
@@ -430,7 +489,13 @@ export function Composer({
             className="btn primary"
             onClick={submit}
             disabled={!canSubmit}
-            title={missing.length > 0 ? 'Fill all variables first' : 'Submit generation'}
+            title={
+              missing.length > 0
+                ? 'Fill all variables first'
+                : promptStale
+                  ? 'Reset the prompt to rendered to re-sync with the variables'
+                  : 'Submit generation'
+            }
             style={{ marginTop: 4, width: '100%', justifyContent: 'center' }}
           >
             {submitting ? 'Submitting…' : '▶ Generate video'}

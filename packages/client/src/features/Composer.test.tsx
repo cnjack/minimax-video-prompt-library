@@ -225,4 +225,78 @@ describe('Composer camera-movement preset chips', () => {
     fireEvent.click(screen.getByRole('button', { name: /reset to rendered/i }));
     expect(prompt.value).toBe('A film of a car');
   });
+
+  it('disables preset chips while template variables are unresolved', async () => {
+    renderComposer();
+    await waitFor(() => expect(screen.getByLabelText('subject')).toBeInTheDocument());
+
+    const group = screen.getByRole('group', { name: /camera movement presets/i });
+    const chips = within(group).getAllByRole('button');
+    expect(chips).toHaveLength(6);
+    // A chip clicked before variables are filled would freeze the prompt to only
+    // the camera token, so the chips must be unusable until variables resolve.
+    for (const chip of chips) {
+      expect(chip).toBeDisabled();
+    }
+
+    // Filling the variable re-enables every chip.
+    await userEvent.type(screen.getByLabelText('subject'), 'a car');
+    await waitFor(() => {
+      for (const chip of within(group).getAllByRole('button')) {
+        expect(chip).toBeEnabled();
+      }
+    });
+  });
+
+  it('exposes each preset description through aria-describedby', async () => {
+    renderComposer();
+    await waitFor(() => expect(screen.getByLabelText('subject')).toBeInTheDocument());
+
+    const group = screen.getByRole('group', { name: /camera movement presets/i });
+    const chips = within(group).getAllByRole('button');
+    // Every chip points at a real description element (not a title-only tooltip).
+    for (const chip of chips) {
+      const describedBy = chip.getAttribute('aria-describedby');
+      expect(describedBy).toBeTruthy();
+      const description = document.getElementById(describedBy!);
+      expect(description?.textContent?.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it('blocks a stale prompt (variable changed after a cue) until reset re-syncs it', async () => {
+    const user = userEvent.setup();
+    createGeneration.mockResolvedValue({ job: { id: 'job-stale' }, reused: false });
+    renderComposer();
+    await user.type(await screen.findByLabelText('subject'), 'a car');
+
+    // Insert a cue → freezes the override against the current values.
+    await user.click(screen.getByRole('button', { name: 'Pan left' }));
+    const submit = screen.getByRole('button', { name: /Generate video/i });
+    expect(submit).toBeEnabled();
+    expect(screen.getByLabelText('Rendered prompt')).toHaveValue('A film of a car pan left');
+
+    // Change the variable → the frozen prompt text is now stale.
+    const subject = screen.getByLabelText('subject');
+    await user.clear(subject);
+    await user.type(subject, 'a dog');
+    await waitFor(() => expect(submit).toBeDisabled());
+    expect(
+      screen.getByText(/no longer matches the recorded values/i),
+    ).toBeInTheDocument();
+
+    // Reset re-syncs the prompt to the current variable values.
+    await user.click(screen.getByRole('button', { name: /reset to rendered/i }));
+    await waitFor(() => expect(submit).toBeEnabled());
+    expect(screen.getByLabelText('Rendered prompt')).toHaveValue('A film of a dog');
+
+    // The submitted prompt and recorded values are now consistent.
+    await user.click(submit);
+    await waitFor(() => expect(createGeneration).toHaveBeenCalledTimes(1));
+    const payload = createGeneration.mock.calls[0]![0] as {
+      prompt: string;
+      values: Record<string, string>;
+    };
+    expect(payload.prompt).toBe('A film of a dog');
+    expect(payload.values).toEqual({ subject: 'a dog' });
+  });
 });

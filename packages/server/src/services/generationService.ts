@@ -329,6 +329,11 @@ export class GenerationService {
    * override (e.g. the rendered prompt with inserted camera-motion cues) is used
    * verbatim; otherwise the immutable version is rendered with `values`. Either
    * way the result is subject to the H3 rendered-character limit by the caller.
+   *
+   * The immutable version is ALWAYS rendered/validated with `values` first —
+   * even when a non-blank override is supplied — so unresolved variables and
+   * template syntax errors still fail BEFORE any job is created or the provider
+   * is called. The validated override then remains the final rendered prompt.
    * The route layer trims the override via the schema; the `.trim()` guard here
    * also protects direct/retry callers that may supply a whitespace-only value.
    */
@@ -337,10 +342,11 @@ export class GenerationService {
     values: Record<string, string>,
     promptOverride: string | undefined,
   ): string {
+    const renderedFromVersion = this.renderOrFail(content, values);
     if (promptOverride !== undefined && promptOverride.trim().length > 0) {
       return promptOverride;
     }
-    return this.renderOrFail(content, values);
+    return renderedFromVersion;
   }
 
   /**

@@ -79,7 +79,7 @@ export function findCameraPreset(id: string): CameraPreset | undefined {
 export interface TokenInsertResult {
   /** The new full text after insertion. */
   text: string;
-  /** Carear position after the inserted token (collapsed selection). */
+  /** Caret position after the inserted token (collapsed selection). */
   selectionStart: number;
   selectionEnd: number;
 }

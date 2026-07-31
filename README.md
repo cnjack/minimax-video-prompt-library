@@ -135,12 +135,23 @@ don't have to remember or retype the phrasing:
 - Activating a chip inserts its token at the current cursor (or replaces the
   current selection) without disturbing the surrounding text; before you place
   the cursor it appends at the end. You can then edit the prompt freely.
+- Chips are **disabled until every variable is filled** (a cue inserted into an
+  unresolved prompt would freeze it to only the camera token). Each chip is also
+  keyboard reachable with a visible focus ring and an accessible description of
+  the motion it inserts.
 - While the prompt is untouched it mirrors the rendered template (filling a
   variable live-updates it). The first chip insert or manual edit freezes it as
   the source of truth; **Reset to rendered** re-syncs it from the variables.
+- If you change a variable *after* the prompt was frozen, generation is blocked
+  with a clear message because the frozen text would no longer match the recorded
+  values. **Reset to rendered** re-syncs the prompt to the current values (then
+  re-apply any camera cues) to submit a consistent prompt.
 - The exact text shown is what is generated, sent as a `prompt` override and
   still validated through the existing H3 request policy (the 7000-character
-  limit, duration, ratio, and media rules) before submission.
+  limit, duration, ratio, and media rules) before submission. Server-side, the
+  immutable version is *also* validated with the supplied `values` even when an
+  override is present, so an unresolved variable or template error always fails
+  before any job or provider call.
 
 The preset labels and inserted tokens live in one pure, tested module
 (`packages/shared/src/cameraPresets.ts`) so they are not duplicated across the
