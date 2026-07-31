@@ -135,6 +135,29 @@ describe('MinimaxProvider', () => {
     expect(out.failure?.message).toBe('flagged');
   });
 
+  it('converts a succeeded query with no usable url into a recoverable failure (no null-url succeeded)', async () => {
+    const provider = makeProvider(
+      fakeFetch({ status: 200, body: { task: { status: 'succeeded' } } }),
+    );
+    const out = await provider.query('t1');
+    expect(out.status).toBe('failed'); // recoverable, not a null-resultUrl succeeded
+    expect(out.failure?.category).toBe('provider_failure');
+    expect(out.resultUrl).toBeUndefined();
+  });
+
+  it('classifies an async task.error by its code (not always provider_failure)', async () => {
+    const provider = makeProvider(
+      fakeFetch({
+        status: 200,
+        body: {
+          task: { status: 'failed', error: { message: 'blocked', code: 'SAFETY' } },
+        },
+      }),
+    );
+    const out = await provider.query('t1');
+    expect(out.failure?.category).toBe('content_moderation');
+  });
+
   it('maps cancelled to a terminal failed status', async () => {
     const provider = makeProvider(
       fakeFetch({ status: 200, body: { task: { status: 'cancelled' } } }),

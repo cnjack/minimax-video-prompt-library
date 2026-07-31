@@ -224,3 +224,90 @@ describe('Core generation path', () => {
     expect(mock.getDefaultScenario()).toBe('failure');
   });
 });
+
+describe('aspect ratio / frame mode API rejection', () => {
+  it('rejects first-frame mode with a concrete ratio (requires adaptive)', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    const versionId = created.body.versions[0].id as string;
+
+    const bad = await request(app)
+      .post('/api/generations')
+      .send({
+        promptVersionId: versionId,
+        values: {},
+        durationSeconds: 5,
+        aspectRatio: '16:9',
+        resolution: '2K',
+        firstFrameUrl: 'https://example.com/a.png',
+      });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error.code).toBe('validation_error');
+  });
+
+  it('accepts first-frame mode with adaptive', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    const versionId = created.body.versions[0].id as string;
+
+    await request(app)
+      .post('/api/generations')
+      .send({
+        promptVersionId: versionId,
+        values: {},
+        durationSeconds: 5,
+        aspectRatio: 'adaptive',
+        resolution: '2K',
+        firstFrameUrl: 'https://example.com/a.png',
+      })
+      .expect(201);
+  });
+});
+
+describe('retry idempotency', () => {
+  it('POST /:id/retry is idempotent across repeated calls (one new job, second reused)', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    const versionId = created.body.versions[0].id as string;
+
+    // A job that fails immediately at submission (provider_error scenario).
+    const failed = await request(app)
+      .post('/api/generations')
+      .send({
+        promptVersionId: versionId,
+        values: {},
+        durationSeconds: 5,
+        aspectRatio: '16:9',
+        resolution: '2K',
+        mockScenario: 'provider_error',
+      })
+      .expect(201);
+    expect(failed.body.job.status).toBe('failed');
+    const failedId = failed.body.job.id as string;
+
+    // First retry creates a new job (201).
+    const r1 = await request(app)
+      .post(`/api/generations/${failedId}/retry`)
+      .expect(201);
+    const retriedId = r1.body.job.id as string;
+    expect(retriedId).not.toBe(failedId);
+
+    // A network retry of the same POST reuses the retried job (200) — no second
+    // paid generation.
+    const r2 = await request(app)
+      .post(`/api/generations/${failedId}/retry`)
+      .expect(200);
+    expect(r2.body.reused).toBe(true);
+    expect(r2.body.job.id).toBe(retriedId);
+
+    // Exactly two jobs: the failed source + one retry.
+    const history = await request(app).get('/api/generations').expect(200);
+    expect(history.body.total).toBe(2);
+  });
+});

@@ -1,7 +1,7 @@
 /** Job history list and job detail view. The client polls the server's job
  * endpoint (never the provider) to reflect the server-side poller's updates. */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { GenerationJob, JobStatus } from '@h3/shared';
 import { api, ApiClientError } from '../api/client.js';
 import { useNav } from '../nav.js';
@@ -16,21 +16,41 @@ export function JobsList() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'' | JobStatus>('');
 
-  const load = useCallback(async () => {
-    try {
-      const res = await api.listJobs({ status: filter || undefined });
-      setJobs(res.items);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof ApiClientError ? e.message : 'Failed to load jobs.');
-    }
-  }, [filter]);
-
+  // Filter-keyed polling lifecycle. Each filter change starts a fresh lifecycle:
+  // an AbortController cancels the previous in-flight request and a `cancelled`
+  // flag ignores any straggler response, so a slow response for an old filter
+  // can never overwrite the current filter's data (mirrors JobDetail). This
+  // matters because filters can change faster than the network resolves.
   useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const res = await api.listJobs(
+          { status: filter || undefined },
+          { signal: controller.signal },
+        );
+        // Ignore responses from a superseded filter or an aborted request.
+        if (cancelled || controller.signal.aborted) return;
+        setJobs(res.items);
+        setError(null);
+      } catch (e) {
+        if (cancelled || controller.signal.aborted) return;
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+        setError(e instanceof ApiClientError ? e.message : 'Failed to load jobs.');
+      }
+    };
+
     void load();
-    const t = setInterval(() => void load(), POLL_MS);
-    return () => clearInterval(t);
-  }, [load]);
+    const timer = setInterval(() => void load(), POLL_MS);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearInterval(timer);
+    };
+  }, [filter]);
 
   return (
     <>

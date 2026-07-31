@@ -5,10 +5,13 @@ import { JobRepository } from '../db/repositories/jobRepo.js';
 import { PromptRepository } from '../db/repositories/promptRepo.js';
 import { VersionRepository } from '../db/repositories/versionRepo.js';
 import { MockProvider } from '../providers/mockProvider.js';
+import { MinimaxProvider } from '../providers/minimaxProvider.js';
+import type { FetchLike } from '../providers/minimaxTransport.js';
 import { JobPoller } from '../poller/poller.js';
 import { GenerationService } from '../services/generationService.js';
 import { PromptService } from '../services/promptService.js';
 import { ApiError } from '../errors.js';
+import { nowIso } from '../util.js';
 import { ErrorCode } from '@h3/shared';
 
 let testDb: TestDb;
@@ -231,5 +234,62 @@ describe('JobPoller lifecycle', () => {
     const final = jobs.getById(job.id);
     expect(final?.status).toBe('failed');
     expect(final?.errorCode).toBe('content_moderation');
+  });
+});
+
+describe('JobPoller: provider "succeeded" without a usable url', () => {
+  function fakeFetch(body: unknown): FetchLike {
+    return async () => ({
+      ok: true,
+      status: 200,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    });
+  }
+
+  it('converts to a recoverable failed job (never an unretryable null-url succeeded)', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const created = jobs.create({
+      id: 'job-succ-no-url',
+      promptId: detail.prompt.id,
+      promptVersionId: detail.versions[0]!.id,
+      renderedPrompt: 'render cat',
+      model: 'MiniMax-H3',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'running',
+      provider: 'mock',
+      providerTaskId: 'task-succ-no-url',
+      resultUrl: null,
+      errorCode: null,
+      errorMessage: null,
+      idempotencyKey: 'k-succ-no-url',
+      idempotencyPayloadHash: 'h-succ-no-url',
+      parameters: {},
+      now: nowIso(),
+    });
+
+    // Real adapter over a fake transport returning succeeded WITHOUT a url.
+    const provider = new MinimaxProvider({
+      baseUrl: 'https://api.minimaxi.com',
+      apiKey: 'test-key',
+      fetch: fakeFetch({ task: { status: 'succeeded' } }),
+    });
+    const poller = new JobPoller(jobs, provider, mockConfig);
+    await poller.tick();
+
+    const final = jobs.getById(created.id);
+    // Not a null-resultUrl succeeded row; a recoverable failed one.
+    expect(final?.status).toBe('failed');
+    expect(final?.resultUrl).toBeNull();
+    expect(final?.errorCode).toBe('provider_failure');
+    expect(final?.errorMessage).toMatch(/no usable result URL/i);
+    expect(final?.completedAt).not.toBeNull();
   });
 });

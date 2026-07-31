@@ -188,7 +188,16 @@ export class GenerationService {
     }
   }
 
-  /** Retry a failed/expired job as a brand-new job (history stays truthful). */
+  /**
+   * Retry a failed/expired job as a brand-new job (history stays truthful).
+   *
+   * Idempotency: the retry key is derived deterministically from the source job
+   * id (`retry:<id>`) and threaded into `create`, so a network retry of this
+   * POST can never create a second paid generation — it reuses the same retried
+   * job. Reusing an existing retried job preserves the same create-vs-conflict
+   * semantics as the create endpoint. Retrying a DIFFERENT (e.g. the already
+   * retried) job derives a different key and so still yields a fresh job.
+   */
   async retry(jobId: string): Promise<CreateGenerationResult> {
     const original = this.requireJob(jobId);
     if (original.status !== 'failed' && original.status !== 'expired') {
@@ -210,7 +219,6 @@ export class GenerationService {
       referenceAudioUrl?: string;
       mockScenario?: MockScenario;
     };
-    // Fresh idempotency key => always a new job.
     return this.create({
       promptVersionId: original.promptVersionId,
       values: params.values ?? {},
@@ -223,6 +231,7 @@ export class GenerationService {
       referenceVideoUrl: params.referenceVideoUrl,
       referenceAudioUrl: params.referenceAudioUrl,
       mockScenario: params.mockScenario,
+      idempotencyKey: `retry:${original.id}`,
     });
   }
 

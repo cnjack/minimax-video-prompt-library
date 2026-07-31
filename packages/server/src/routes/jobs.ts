@@ -41,8 +41,10 @@ export function createJobsRouter(services: AppServices): Router {
   router.post(
     '/:id/retry',
     asyncHandler(async (req, res) => {
+      // Idempotent: a network retry reuses the existing retried job (derived
+      // `retry:<id>` key) and returns 200; the first attempt creates (201).
       const result = await services.generations.retry(routeParam(req, 'id'));
-      res.status(201).json(result);
+      res.status(result.reused ? 200 : 201).json(result);
     }),
   );
 

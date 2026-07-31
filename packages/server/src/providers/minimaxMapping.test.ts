@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { ProviderErrorCategory } from '@h3/shared';
 import {
   classifyHttpFailure,
+  classifyTaskFailureCategory,
   extractResultUrl,
   extractTaskFailure,
   extractTaskId,
   isTerminalStatus,
+  mapQueryResult,
   mapTaskStatus,
 } from './minimaxMapping.js';
 
@@ -143,5 +145,112 @@ describe('query response extractors (nested task envelope)', () => {
     expect(extractTaskId({ task_id: 'abc' })).toBe('abc');
     expect(extractTaskId({ task: { task_id: 'def' } })).toBe('def');
     expect(extractTaskId({})).toBeUndefined();
+  });
+});
+
+describe('classifyTaskFailureCategory (async task.error taxonomy)', () => {
+  it('classifies moderation signals as content_moderation', () => {
+    expect(
+      classifyTaskFailureCategory({ message: 'flagged', code: 'CONTENT_RISK' }),
+    ).toBe(ProviderErrorCategory.CONTENT_MODERATION);
+    expect(
+      classifyTaskFailureCategory({ message: 'blocked by safety review' }),
+    ).toBe(ProviderErrorCategory.CONTENT_MODERATION);
+  });
+
+  it('classifies balance signals as insufficient_balance', () => {
+    expect(
+      classifyTaskFailureCategory({ message: 'no credits left', code: 'INSUFFICIENT_BALANCE' }),
+    ).toBe(ProviderErrorCategory.INSUFFICIENT_BALANCE);
+    expect(classifyTaskFailureCategory({ message: 'insufficient balance' })).toBe(
+      ProviderErrorCategory.INSUFFICIENT_BALANCE,
+    );
+  });
+
+  it('classifies rate-limit signals as rate_limit', () => {
+    expect(
+      classifyTaskFailureCategory({ message: 'too many requests', code: 429 }),
+    ).toBe(ProviderErrorCategory.RATE_LIMIT);
+  });
+
+  it('falls back to provider_failure for generic/unknown errors', () => {
+    expect(classifyTaskFailureCategory({ message: 'something went wrong' })).toBe(
+      ProviderErrorCategory.PROVIDER_FAILURE,
+    );
+    expect(
+      classifyTaskFailureCategory({ message: 'oops', code: 'INTERNAL_X' }),
+    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
+  });
+});
+
+describe('mapQueryResult', () => {
+  it('maps a succeeded task with a result url', () => {
+    expect(
+      mapQueryResult({
+        task: { status: 'succeeded', content: { url: 'https://x/v.mp4' } },
+      }),
+    ).toEqual({ status: 'succeeded', resultUrl: 'https://x/v.mp4' });
+  });
+
+  it('maps a running task with no url and no failure', () => {
+    expect(mapQueryResult({ task: { status: 'running' } })).toEqual({
+      status: 'running',
+    });
+  });
+
+  it('converts succeeded WITHOUT a usable url into a recoverable failed failure', () => {
+    const out = mapQueryResult({ task: { status: 'succeeded' } });
+    expect(out.status).toBe('failed'); // not succeeded → still retryable
+    expect(out.failure?.category).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
+    expect(out.failure?.message).toMatch(/no usable result URL/i);
+    // No resultUrl leaked onto a failed-convert.
+    expect(out.resultUrl).toBeUndefined();
+  });
+
+  it('converts succeeded with an empty content url into a recoverable failed failure', () => {
+    const out = mapQueryResult({
+      task: { status: 'succeeded', content: { url: '' } },
+    });
+    expect(out.status).toBe('failed');
+    expect(out.failure?.category).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
+  });
+
+  it('classifies a failed task.error by its stable code instead of always provider_failure', () => {
+    const out = mapQueryResult({
+      task: { status: 'failed', error: { message: 'blocked', code: 'SAFETY_RISK' } },
+    });
+    expect(out.status).toBe('failed');
+    expect(out.failure?.category).toBe(ProviderErrorCategory.CONTENT_MODERATION);
+    expect(out.failure?.message).toBe('blocked');
+  });
+
+  it('maps a balance task.error to insufficient_balance', () => {
+    expect(
+      mapQueryResult({
+        task: { status: 'failed', error: { message: 'insufficient balance', code: 402 } },
+      }).failure?.category,
+    ).toBe(ProviderErrorCategory.INSUFFICIENT_BALANCE);
+  });
+
+  it('maps a rate-limit task.error to rate_limit', () => {
+    expect(
+      mapQueryResult({
+        task: { status: 'failed', error: { message: 'rate limited', code: 429 } },
+      }).failure?.category,
+    ).toBe(ProviderErrorCategory.RATE_LIMIT);
+  });
+
+  it('maps a generic failed task.error to provider_failure', () => {
+    expect(
+      mapQueryResult({
+        task: { status: 'failed', error: { message: 'internal error', code: 'X' } },
+      }).failure?.category,
+    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
+  });
+
+  it('maps cancelled to a terminal failed status with no failure', () => {
+    expect(mapQueryResult({ task: { status: 'cancelled' } })).toEqual({
+      status: 'failed',
+    });
   });
 });

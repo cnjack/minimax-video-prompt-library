@@ -146,6 +146,25 @@ describe('createGenerationSchema cross-field + ratio rules (negative)', () => {
     ).not.toThrow();
   });
 
+  it('rejects a concrete ratio for first/last-frame mode (requires adaptive)', () => {
+    expect(() =>
+      createGenerationSchema.parse({
+        ...base,
+        aspectRatio: '16:9',
+        firstFrameUrl: 'https://example.com/a.png',
+      }),
+    ).toThrow();
+    // First + last frame together also requires adaptive.
+    expect(() =>
+      createGenerationSchema.parse({
+        ...base,
+        aspectRatio: '16:9',
+        firstFrameUrl: 'https://example.com/a.png',
+        lastFrameUrl: 'https://example.com/b.png',
+      }),
+    ).toThrow();
+  });
+
   it('accepts adaptive or concrete ratio for reference mode', () => {
     expect(() =>
       createGenerationSchema.parse({

@@ -190,7 +190,7 @@ export interface RatioValidationError {
 /**
  * Conditional ratio behavior, honestly enforced per the H3 contract:
  *  - text-to-video requires a concrete (non-adaptive) ratio;
- *  - first/last-frame mode uses `adaptive`;
+ *  - first/last-frame mode requires `adaptive` (a concrete ratio is invalid);
  *  - reference mode may use `adaptive` or a concrete ratio.
  *
  * Returns an error when the chosen ratio is incompatible with the media mode.
@@ -204,6 +204,12 @@ export function validateRatioForMode(
     return {
       message:
         'Text-to-video requires an explicit aspect ratio; "adaptive" is only valid with a first/last frame or reference media.',
+    };
+  }
+  if (mode === 'frame' && !isAdaptiveRatio(ratio)) {
+    return {
+      message:
+        'First/last-frame mode requires the "adaptive" aspect ratio; choose adaptive or remove the frame media.',
     };
   }
   return null;

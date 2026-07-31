@@ -115,6 +115,108 @@ export function extractTaskFailure(
   return { message, code };
 }
 
+/**
+ * Read the raw task status string from a query response (nested `task.status`
+ * or a flat top-level `status`), tolerating either envelope shape.
+ */
+function readRawStatus(body: unknown): unknown {
+  const task = readTask(body);
+  if (task && 'status' in task) {
+    return task.status;
+  }
+  if (body && typeof body === 'object' && 'status' in body) {
+    return (body as Record<string, unknown>).status;
+  }
+  return undefined;
+}
+
+export interface MappedQueryFailure {
+  category: ProviderErrorCategory;
+  message: string;
+}
+
+export interface MappedQueryResult {
+  status: JobStatus;
+  resultUrl?: string;
+  failure?: MappedQueryFailure;
+}
+
+/**
+ * Classify an async `task.error` from a query response into the local provider
+ * error taxonomy, preserving the provider's stable code/message signal instead
+ * of always collapsing to `provider_failure`.
+ *
+ * MiniMax surfaces failure reason via `task.error.code` (a string/number) and/or
+ * `task.error.message`. We map the known stable families (moderation, balance,
+ * rate-limit, auth, invalid request) using the code plus message keywords, and
+ * fall back to `provider_failure` for anything unrecognized.
+ */
+export function classifyTaskFailureCategory(
+  failure: { message: string; code?: string | number },
+): ProviderErrorCategory {
+  const code = failure.code !== undefined ? String(failure.code) : '';
+  const text = `${code} ${failure.message}`.toLowerCase();
+
+  if (/balance|credit|insufficient|payment|402/.test(text)) {
+    return ProviderErrorCategory.INSUFFICIENT_BALANCE;
+  }
+  if (/moderat|risk|sensitiv|content polic|not safe|safety|422/.test(text)) {
+    return ProviderErrorCategory.CONTENT_MODERATION;
+  }
+  if (/rate|quota|too many|429/.test(text)) {
+    return ProviderErrorCategory.RATE_LIMIT;
+  }
+  if (/unauthor|invalid.*key|invalid.*token|auth|401/.test(text)) {
+    return ProviderErrorCategory.AUTH;
+  }
+  if (/invalid|bad request|malformed|400/.test(text)) {
+    return ProviderErrorCategory.INVALID_REQUEST;
+  }
+  return ProviderErrorCategory.PROVIDER_FAILURE;
+}
+
+/**
+ * Map a full query response body into the local job outcome: status, optional
+ * result URL, and optional provider failure.
+ *
+ * Two correctness guarantees over the raw extractors:
+ *  1. A provider `succeeded` status without a usable result URL is converted to
+ *     a RECOVERABLE provider failure (local `failed`), so the job never ends up
+ *     as an unretryable `succeeded` row with a null `resultUrl`. The user can
+ *     retry it as a new job.
+ *  2. An async `task.error` is classified by its stable provider code (via
+ *     {@link classifyTaskFailureCategory}) rather than always `provider_failure`.
+ */
+export function mapQueryResult(body: unknown): MappedQueryResult {
+  const status = mapTaskStatus(readRawStatus(body));
+  const resultUrl = extractResultUrl(body);
+
+  if (status === 'succeeded' && !resultUrl) {
+    return {
+      status: 'failed',
+      failure: {
+        category: ProviderErrorCategory.PROVIDER_FAILURE,
+        message:
+          'The provider reported success but returned no usable result URL.',
+      },
+    };
+  }
+
+  const taskFailure = extractTaskFailure(body);
+  const failure: MappedQueryFailure | undefined = taskFailure
+    ? {
+        category: classifyTaskFailureCategory(taskFailure),
+        message: taskFailure.message,
+      }
+    : undefined;
+
+  return {
+    status,
+    ...(resultUrl ? { resultUrl } : {}),
+    ...(failure ? { failure } : {}),
+  };
+}
+
 /** Extract the provider task id from a create/query response. */
 export function extractTaskId(body: unknown): string | undefined {
   if (!body || typeof body !== 'object') {

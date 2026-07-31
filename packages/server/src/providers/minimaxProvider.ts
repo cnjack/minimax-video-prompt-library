@@ -6,10 +6,8 @@
 
 import { H3_MODEL, ProviderErrorCategory } from '@h3/shared';
 import {
-  extractResultUrl,
-  extractTaskFailure,
   extractTaskId,
-  mapTaskStatus,
+  mapQueryResult,
 } from './minimaxMapping.js';
 import { buildCreatePayload } from './minimaxPayload.js';
 import { MinimaxTransport } from './minimaxTransport.js';
@@ -74,17 +72,7 @@ export class MinimaxProvider implements VideoProvider {
     const body = await this.transport.get(
       `/v2/query/video_generation/${encodeURIComponent(providerTaskId)}`,
     );
-    const status = mapTaskStatus(
-      (body as { task?: { status?: unknown } } | undefined)?.task?.status ??
-        (body as { status?: unknown })?.status,
-    );
-    const resultUrl = extractResultUrl(body);
-    const failure = extractTaskFailure(body);
-    return {
-      providerTaskId,
-      status,
-      ...(resultUrl ? { resultUrl } : {}),
-      ...(failure ? { failure: { category: ProviderErrorCategory.PROVIDER_FAILURE, message: failure.message } } : {}),
-    };
+    const mapped = mapQueryResult(body);
+    return { providerTaskId, ...mapped };
   }
 }

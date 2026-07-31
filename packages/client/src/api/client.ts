@@ -47,6 +47,13 @@ interface RequestOptions {
   method: string;
   body?: unknown;
   query?: Record<string, string | undefined>;
+  /** Optional abort signal so callers can cancel in-flight requests. */
+  signal?: AbortSignal;
+}
+
+/** Options accepted by list-style reads. */
+export interface ReadOptions {
+  signal?: AbortSignal;
 }
 
 async function request<T>(path: string, options: RequestOptions): Promise<T> {
@@ -61,6 +68,7 @@ async function request<T>(path: string, options: RequestOptions): Promise<T> {
     headers:
       options.body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    signal: options.signal,
   });
 
   const text = await response.text();
@@ -126,7 +134,10 @@ export const api = {
   },
 
   // Generations
-  listJobs(query: Partial<ListJobsQuery> = {}): Promise<ListResponse<GenerationJob>> {
+  listJobs(
+    query: Partial<ListJobsQuery> = {},
+    options: ReadOptions = {},
+  ): Promise<ListResponse<GenerationJob>> {
     return request('/api/generations', {
       method: 'GET',
       query: {
@@ -134,6 +145,7 @@ export const api = {
         promptId: query.promptId,
         limit: query.limit?.toString(),
       },
+      signal: options.signal,
     });
   },
   createGeneration(body: CreateGenerationRequest): Promise<CreateGenerationResponse> {

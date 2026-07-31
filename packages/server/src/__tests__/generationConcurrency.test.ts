@@ -265,6 +265,145 @@ describe('idempotency under concurrency', () => {
   });
 });
 
+describe('retry idempotency (derived retry:<id> key)', () => {
+  let versionId: string;
+  let promptId: string;
+  let provider: VideoProvider & { creates: number };
+  let failedJob: GenerationJob;
+
+  beforeEach(() => {
+    const detail = promptService.create({
+      name: 'P',
+      description: 'd',
+      tags: [],
+      content: 'render {{subject}}',
+      status: 'active',
+    });
+    promptId = detail.prompt.id;
+    versionId = detail.versions[0]!.id;
+    provider = countingProvider(new MockProvider());
+    generationService = new GenerationService(
+      new VersionRepository(testDb.db),
+      jobs,
+      provider,
+      'mock',
+    );
+    // Plant a FAILED source job whose stored scenario is 'success' so that a
+    // retry actually submits (queued) instead of failing again. This isolates
+    // retry idempotency from the provider submission path.
+    failedJob = jobs.create({
+      id: 'orig-failed',
+      promptId,
+      promptVersionId: versionId,
+      renderedPrompt: 'render cat',
+      model: 'MiniMax-H3',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'failed',
+      provider: 'mock',
+      providerTaskId: null,
+      resultUrl: null,
+      errorCode: 'provider_failure',
+      errorMessage: 'boom',
+      idempotencyKey: 'orig-key',
+      idempotencyPayloadHash: computePayloadHash({
+        promptVersionId: versionId,
+        values: { subject: 'cat' },
+        durationSeconds: 5,
+        aspectRatio: '16:9',
+        resolution: '2K',
+      }),
+      parameters: {
+        values: { subject: 'cat' },
+        durationSeconds: 5,
+        aspectRatio: '16:9',
+        resolution: '2K',
+        mockScenario: 'success',
+      },
+      now: '2024-01-01T00:00:00Z',
+    });
+  });
+
+  it('repeated retries of the same source reuse ONE retried job (one provider call)', async () => {
+    const r1 = await generationService.retry(failedJob.id);
+    expect(r1.reused).toBe(false);
+    expect(r1.job.status).toBe('queued');
+    const retriedId = r1.job.id;
+
+    // A network retry of the same POST must reuse, never create a second job.
+    const r2 = await generationService.retry(failedJob.id);
+    expect(r2.reused).toBe(true);
+    expect(r2.job.id).toBe(retriedId);
+
+    // Exactly one paid submission for the retry; zero for the planted source.
+    expect(provider.creates).toBe(1);
+    // Source + exactly one retried job.
+    expect(jobs.list({ limit: 100 })).toHaveLength(2);
+  });
+
+  it('concurrent retries of the same source create exactly ONE retried job (no double charge)', async () => {
+    const results = await Promise.all([
+      generationService.retry(failedJob.id),
+      generationService.retry(failedJob.id),
+      generationService.retry(failedJob.id),
+    ]);
+    expect(provider.creates).toBe(1);
+    expect(jobs.list({ limit: 100 })).toHaveLength(2);
+    const created = results.find((r) => !r.reused);
+    expect(created).toBeTruthy();
+    expect(results.filter((r) => r.reused)).toHaveLength(2);
+    expect(results.every((r) => r.job.id === created!.job.id)).toBe(true);
+  });
+
+  it('retrying a DIFFERENT source job derives a different key and creates a distinct job', async () => {
+    // A second failed source job.
+    const other = jobs.create({
+      id: 'orig-failed-2',
+      promptId,
+      promptVersionId: versionId,
+      renderedPrompt: 'render cat',
+      model: 'MiniMax-H3',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'failed',
+      provider: 'mock',
+      providerTaskId: null,
+      resultUrl: null,
+      errorCode: 'provider_failure',
+      errorMessage: 'boom',
+      idempotencyKey: 'orig-key-2',
+      idempotencyPayloadHash: 'h2',
+      parameters: {
+        values: { subject: 'cat' },
+        durationSeconds: 5,
+        aspectRatio: '16:9',
+        resolution: '2K',
+        mockScenario: 'success',
+      },
+      now: '2024-01-01T00:00:00Z',
+    });
+
+    const r1 = await generationService.retry(failedJob.id);
+    const r2 = await generationService.retry(other.id);
+    expect(r1.job.id).not.toBe(r2.job.id);
+    expect(provider.creates).toBe(2);
+    // Two sources + two distinct retried jobs.
+    expect(jobs.list({ limit: 100 })).toHaveLength(4);
+  });
+});
+
 describe('util: isUniqueConstraintError', () => {
   it('detects a SQLite UNIQUE constraint message', async () => {
     const { isUniqueConstraintError } = await import('../util.js');

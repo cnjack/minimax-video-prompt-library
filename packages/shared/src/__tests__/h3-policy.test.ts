@@ -147,6 +147,22 @@ describe('conditional ratio behavior', () => {
     expect(validateRatioForMode('16:9', {})).toBeNull();
   });
 
+  it('rejects any concrete ratio for first/last-frame mode (requires adaptive)', () => {
+    const inputs = { firstFrameUrl: 'https://x/a.png' };
+    expect(validateRatioForMode('16:9', inputs)).not.toBeNull();
+    expect(validateRatioForMode('9:16', inputs)).not.toBeNull();
+    expect(validateRatioForMode('1:1', inputs)).not.toBeNull();
+  });
+
+  it('requires adaptive for combined first + last frame mode', () => {
+    const inputs = {
+      firstFrameUrl: 'https://x/a.png',
+      lastFrameUrl: 'https://x/b.png',
+    };
+    expect(validateRatioForMode('16:9', inputs)).not.toBeNull();
+    expect(validateRatioForMode('adaptive', inputs)).toBeNull();
+  });
+
   it('accepts adaptive for first/last-frame mode', () => {
     expect(
       validateRatioForMode('adaptive', { firstFrameUrl: 'https://x/a.png' }),

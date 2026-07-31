@@ -6,4 +6,4 @@ coverage
 *.db-wal
 .git
 .env
-.tsbuildinfo
+*.tsbuildinfo
