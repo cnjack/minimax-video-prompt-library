@@ -29,21 +29,9 @@ import { api, ApiClientError } from '../api/client.js';
 import { useNav } from '../nav.js';
 import { newRequestId } from '../util.js';
 import { Badge, ErrorBanner, Field, Spinner } from '../components.js';
+import { snapshotValues } from './promptSnapshot.js';
 
 const MOCK_SCENARIOS = ['success', 'failure', 'expired', 'provider_error', 'slow'] as const;
-
-/**
- * Deterministic serialization of the variable values so a touched prompt can
- * detect when later variable edits made its frozen text stale. Keys are sorted
- * by UTF-16 code unit (locale-independent) so insertion order never affects the
- * comparison.
- */
-function snapshotValues(values: Record<string, string>): string {
-  return Object.keys(values)
-    .sort()
-    .map((key) => `${key}=${values[key] ?? ''}`)
-    .join('\n');
-}
 
 export function Composer({
   promptId,
