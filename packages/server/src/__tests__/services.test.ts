@@ -273,6 +273,140 @@ describe('GenerationService idempotency', () => {
   });
 });
 
+describe('GenerationService prompt override (camera cues)', () => {
+  it('uses the supplied prompt verbatim instead of rendering the version', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const result = await generationService.create({
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      prompt: 'a cat, tracking shot',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+    });
+    expect(result.job.renderedPrompt).toBe('a cat, tracking shot');
+  });
+
+  it('still enforces the H3 char limit on the supplied prompt before submission', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    await expect(
+      generationService.create({
+        promptVersionId: detail.versions[0]!.id,
+        // Resolved values so the version itself validates; the oversized
+        // override (not the version) is what must trip the H3 char limit.
+        values: { subject: 'cat' },
+        prompt: 'x'.repeat(7001),
+        durationSeconds: 5,
+        aspectRatio: '16:9',
+        resolution: '2K',
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.VALIDATION_ERROR, status: 400 });
+    // No job row created (enforced before persistence).
+    expect(jobs.list({ limit: 100 })).toHaveLength(0);
+  });
+
+  it('treats a blank prompt override as absent and renders from the version', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const result = await generationService.create({
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      prompt: '   ',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+    });
+    expect(result.job.renderedPrompt).toBe('render cat');
+  });
+
+  it('distinguishes jobs by the supplied prompt text for idempotency', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    const base = {
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      durationSeconds: 5,
+      aspectRatio: '16:9' as const,
+      resolution: '2K' as const,
+      idempotencyKey: 'k-prompt',
+    };
+    const first = await generationService.create({ ...base, prompt: 'pan left' });
+    expect(first.job.renderedPrompt).toBe('pan left');
+
+    // Same key, different prompt text -> conflict (not reuse).
+    await expect(
+      generationService.create({ ...base, prompt: 'push in' }),
+    ).rejects.toMatchObject({ code: ErrorCode.IDEMPOTENCY_CONFLICT });
+
+    // Same key, same prompt text -> reuse.
+    const reused = await generationService.create({ ...base, prompt: 'pan left' });
+    expect(reused.reused).toBe(true);
+    expect(reused.job.id).toBe(first.job.id);
+  });
+
+  it('rejects a non-blank override when the version still has unresolved variables', async () => {
+    // Defence in depth: even though a prompt override is supplied, the immutable
+    // version is validated with `values` first, so an unresolved variable fails
+    // before any job/provider call — the override can never mask a bad version.
+    const detail = createPromptWithContent('render {{subject}}');
+    await expect(
+      generationService.create({
+        promptVersionId: detail.versions[0]!.id,
+        values: {},
+        prompt: 'a cat, tracking shot',
+        durationSeconds: 5,
+        aspectRatio: '16:9',
+        resolution: '2K',
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.UNRESOLVED_VARIABLE });
+    // No job row created (validated before persistence).
+    expect(jobs.list({ limit: 100 })).toHaveLength(0);
+  });
+
+  it('uses the validated override verbatim once the version renders successfully', async () => {
+    // The version renders to "render cat" (validated) but the override is the
+    // final rendered prompt — proving validation does not swap the override in.
+    const detail = createPromptWithContent('render {{subject}}');
+    const result = await generationService.create({
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      prompt: 'a cat, tracking shot',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+    });
+    expect(result.job.renderedPrompt).toBe('a cat, tracking shot');
+  });
+});
+
+describe('GenerationService retry retains camera-cue override', () => {
+  it('a retried failed job keeps parameters.prompt as the rendered prompt', async () => {
+    const detail = createPromptWithContent('render {{subject}}');
+    // Submit with a camera-cue override under a deterministic failure scenario
+    // so the job lands in the retryable `failed` state.
+    const first = await generationService.create({
+      promptVersionId: detail.versions[0]!.id,
+      values: { subject: 'cat' },
+      prompt: 'a cat, tracking shot',
+      durationSeconds: 5,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      mockScenario: 'provider_error',
+    });
+    expect(first.job.status).toBe('failed');
+    expect(first.job.renderedPrompt).toBe('a cat, tracking shot');
+    // The override is persisted in the job parameters for the retry path.
+    expect((first.job.parameters as { prompt?: string }).prompt).toBe(
+      'a cat, tracking shot',
+    );
+
+    // Retry must NOT fall back to rendering the immutable version ("render cat");
+    // the camera-cue override is carried through and re-used verbatim.
+    const retried = await generationService.retry(first.job.id, 'retry-override-1');
+    expect(retried.job.id).not.toBe(first.job.id);
+    expect(retried.job.renderedPrompt).toBe('a cat, tracking shot');
+    expect(retried.job.renderedPrompt).not.toBe('render cat');
+  });
+});
+
 describe('JobPoller lifecycle', () => {
   it('advances a queued job to succeeded across ticks', async () => {
     const detail = createPromptWithContent('render {{subject}}');

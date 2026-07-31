@@ -1,8 +1,15 @@
 /** Generation composer: render variables, pick H3 parameters, and submit a
- * protected generation request. Launched from a prompt version. */
+ * protected generation request. Launched from a prompt version.
+ *
+ * The composer also offers H3 camera-movement preset chips (see
+ * `@h3/shared` `cameraPresets`). Activating a chip inserts the preset's token at
+ * the current prompt cursor without disturbing the surrounding text. The edited
+ * prompt is sent as a rendered-prompt override so it is still validated through
+ * the existing H3 request policy (character limit etc.) before submission. */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CAMERA_PRESETS,
   findMissingVariables,
   H3_ADAPTIVE_RATIO,
   H3_CONCRETE_RATIOS,
@@ -10,9 +17,11 @@ import {
   H3_MIN_DURATION_SECONDS,
   H3_RATIOS,
   H3_RESOLUTION,
+  insertTokenAtSelection,
   mediaMode,
   renderTemplate,
   UnresolvedVariableError,
+  type CameraPreset,
   type ProviderName,
 } from '@h3/shared';
 import type { CreateGenerationRequest } from '@h3/shared';
@@ -20,6 +29,7 @@ import { api, ApiClientError } from '../api/client.js';
 import { useNav } from '../nav.js';
 import { newRequestId } from '../util.js';
 import { Badge, ErrorBanner, Field, Spinner } from '../components.js';
+import { snapshotValues } from './promptSnapshot.js';
 
 const MOCK_SCENARIOS = ['success', 'failure', 'expired', 'provider_error', 'slow'] as const;
 
@@ -38,6 +48,24 @@ export function Composer({
   const [content, setContent] = useState('');
   const [variables, setVariables] = useState<string[]>([]);
   const [values, setValues] = useState<Record<string, string>>({});
+
+  // Editable rendered prompt. While the user has not touched it, it mirrors the
+  // rendered template (so filling a variable live-updates it). Once a camera cue
+  // is inserted or the text is hand-edited, it is frozen as the source of truth
+  // so surrounding edits and inserted tokens are preserved.
+  const [promptOverride, setPromptOverride] = useState('');
+  const [promptTouched, setPromptTouched] = useState(false);
+  // Snapshot of `values` captured when the override was first frozen. Once the
+  // prompt is touched, later variable edits make `values` diverge from the text
+  // actually generated; that staleness blocks submission until the user re-syncs
+  // via "Reset to rendered".
+  const [promptOverrideValues, setPromptOverrideValues] = useState('');
+  const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  // True once the user has focused/placed the cursor in the prompt; before that,
+  // a chip appends at the end rather than at an uninitialized (0) cursor.
+  const promptInteractedRef = useRef(false);
+  // Restored to the DOM after a chip insert so the caret lands after the token.
+  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
 
   const [duration, setDuration] = useState(6);
   const [aspectRatio, setAspectRatio] = useState<string>(H3_CONCRETE_RATIOS[0]);
@@ -87,15 +115,47 @@ export function Composer({
     [content, values],
   );
 
-  const preview = useMemo(() => {
+  // Rendered template (variables substituted). Shown editable in the UI and sent
+  // as the prompt override. Separated from `missing` so a render error (e.g. an
+  // unresolved variable) does not also disable other derived state.
+  const rendered = useMemo<{ text: string | null; error: string | null }>(() => {
     try {
-      return renderTemplate(content, values);
+      return { text: renderTemplate(content, values), error: null };
     } catch (e) {
-      return e instanceof UnresolvedVariableError
-        ? `Missing variable: ${e.variable}`
-        : 'Preview unavailable.';
+      const msg =
+        e instanceof UnresolvedVariableError
+          ? `Missing variable: ${e.variable}`
+          : 'Preview unavailable.';
+      return { text: null, error: msg };
     }
   }, [content, values]);
+
+  // The prompt the user actually sees and submits. Untouched → live render;
+  // touched → the frozen, possibly cue-augmented override.
+  const effectivePrompt = promptTouched ? promptOverride : (rendered.text ?? '');
+
+  // The recorded `values` must stay consistent with the generated prompt text.
+  // A touched prompt is "stale" when the variables changed after it was frozen,
+  // which would otherwise submit prompt text that no longer matches the recorded
+  // values. Detected by comparing the live values to the frozen snapshot.
+  const promptStale =
+    promptTouched && promptOverrideValues !== snapshotValues(values);
+  // Chips are blocked while variables are unresolved (they would freeze the
+  // prompt to only the camera token) and while the prompt is stale.
+  const chipsDisabled = missing.length > 0 || promptStale;
+
+  // Restore the caret to the end of an inserted token once the new value is in
+  // the DOM. Only acts immediately after a chip insert (pendingSelection set).
+  useEffect(() => {
+    const el = promptRef.current;
+    const sel = pendingSelectionRef.current;
+    if (el && sel) {
+      el.selectionStart = sel.start;
+      el.selectionEnd = sel.end;
+      pendingSelectionRef.current = null;
+      el.focus();
+    }
+  }, [effectivePrompt]);
 
   // Conditional H3 ratio behavior, exposed honestly in the UI:
   //  - text-to-video requires a concrete ratio;
@@ -119,7 +179,34 @@ export function Composer({
     return { mode: m, ratios, effectiveRatio: ratio };
   }, [firstFrame, lastFrame, refImage, refVideo, refAudio, aspectRatio]);
 
-  const canSubmit = missing.length === 0 && !submitting;
+  const canSubmit = missing.length === 0 && !promptStale && !submitting;
+
+  function insertCameraPreset(preset: CameraPreset) {
+    const el = promptRef.current;
+    const text = effectivePrompt;
+    // Before the user has placed the cursor, append at the end (intuitive
+    // default) instead of an uninitialized 0 cursor.
+    const fallback = text.length;
+    const start = el && promptInteractedRef.current ? el.selectionStart : fallback;
+    const end = el && promptInteractedRef.current ? el.selectionEnd : fallback;
+    const result = insertTokenAtSelection(text, start, end, preset.token);
+    pendingSelectionRef.current = { start: result.selectionStart, end: result.selectionEnd };
+    setPromptOverride(result.text);
+    // Freeze the prompt and record the values that produced it ONLY at the
+    // untouched→touched transition. A later variable edit then diverges from
+    // this snapshot and is flagged stale until the user re-syncs.
+    if (!promptTouched) {
+      setPromptTouched(true);
+      setPromptOverrideValues(snapshotValues(values));
+    }
+  }
+
+  function resetPrompt() {
+    setPromptTouched(false);
+    setPromptOverride('');
+    setPromptOverrideValues('');
+    promptInteractedRef.current = false;
+  }
 
   async function submit() {
     if (!canSubmit) return;
@@ -128,6 +215,9 @@ export function Composer({
     const body: CreateGenerationRequest = {
       promptVersionId: versionId,
       values,
+      // The rendered prompt (with any inserted camera cues) is the exact text
+      // generated. The server still enforces the H3 character limit on it.
+      prompt: effectivePrompt,
       durationSeconds: duration,
       aspectRatio: effectiveRatio as CreateGenerationRequest['aspectRatio'],
       resolution: H3_RESOLUTION,
@@ -220,20 +310,89 @@ export function Composer({
           </div>
 
           <div className="card">
-            <div className="section-title">Rendered prompt</div>
-            <pre
-              className="mono"
-              style={{
-                whiteSpace: 'pre-wrap',
-                margin: 0,
-                background: 'var(--bg-elev)',
-                padding: 12,
-                borderRadius: 8,
-                border: '1px solid var(--border)',
-              }}
+            <div className="row between">
+              <div className="section-title" style={{ margin: 0 }}>
+                Prompt
+              </div>
+              {promptTouched ? (
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  onClick={resetPrompt}
+                  title="Replace the prompt with the freshly rendered template"
+                >
+                  Reset to rendered
+                </button>
+              ) : null}
+            </div>
+
+            <div
+              className="chips"
+              role="group"
+              aria-label="Camera movement presets"
             >
-              {preview}
-            </pre>
+              {CAMERA_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className="chip"
+                  onClick={() => insertCameraPreset(preset)}
+                  // The motion is also exposed to assistive tech via
+                  // aria-describedby (below), not the title tooltip alone.
+                  title={preset.description}
+                  aria-describedby={`c-chip-desc-${preset.id}`}
+                  disabled={chipsDisabled}
+                >
+                  {preset.label}
+                </button>
+              ))}
+              {missing.length > 0 ? (
+                <span className="chip-hint">
+                  Available once all variables are filled.
+                </span>
+              ) : null}
+            </div>
+            {/* Visually-hidden descriptions referenced by aria-describedby so the
+                motion each chip inserts is announced, not only shown on hover. */}
+            <div className="visually-hidden">
+              {CAMERA_PRESETS.map((preset) => (
+                <span key={preset.id} id={`c-chip-desc-${preset.id}`}>
+                  {preset.description}
+                </span>
+              ))}
+            </div>
+
+            <Field
+              label="Rendered prompt"
+              htmlFor="c-prompt"
+              hint="Camera cues insert at the cursor. This exact text is generated and still validated before submission."
+            >
+              <textarea
+                id="c-prompt"
+                ref={promptRef}
+                value={effectivePrompt}
+                placeholder="Fill in the variables to render the prompt…"
+                onChange={(e) => {
+                  setPromptOverride(e.target.value);
+                  if (!promptTouched) {
+                    setPromptTouched(true);
+                    setPromptOverrideValues(snapshotValues(values));
+                  }
+                  promptInteractedRef.current = true;
+                }}
+                onFocus={() => {
+                  promptInteractedRef.current = true;
+                }}
+                onSelect={() => {
+                  promptInteractedRef.current = true;
+                }}
+                style={{ minHeight: 150 }}
+              />
+            </Field>
+            {rendered.error ? <ErrorBanner message={rendered.error} /> : null}
+            {promptStale ? (
+              <ErrorBanner message="The prompt was edited after a variable changed, so its text no longer matches the recorded values. Reset to rendered to re-sync, then re-apply any camera cues." />
+            ) : null}
           </div>
         </div>
 
@@ -318,7 +477,13 @@ export function Composer({
             className="btn primary"
             onClick={submit}
             disabled={!canSubmit}
-            title={missing.length > 0 ? 'Fill all variables first' : 'Submit generation'}
+            title={
+              missing.length > 0
+                ? 'Fill all variables first'
+                : promptStale
+                  ? 'Reset the prompt to rendered to re-sync with the variables'
+                  : 'Submit generation'
+            }
             style={{ marginTop: 4, width: '100%', justifyContent: 'center' }}
           >
             {submitting ? 'Submitting…' : '▶ Generate video'}

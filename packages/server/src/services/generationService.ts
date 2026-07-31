@@ -47,11 +47,15 @@ export class GenerationService {
       );
     }
 
-    const renderedPrompt = this.renderOrFail(version.content, request.values);
+    const renderedPrompt = this.resolveRenderedPrompt(
+      version.content,
+      request.values,
+      request.prompt,
+    );
 
     // Official H3 contract: the text item is capped at 7000 chars. Enforce on
-    // the rendered prompt (after substitution), server-side, BEFORE any job is
-    // created or the provider is called.
+    // the rendered prompt (after substitution or the supplied override), server-
+    // side, BEFORE any job is created or the provider is called.
     if (renderedPrompt.length > H3_MAX_PROMPT_CHARS) {
       throw new ApiError(
         ErrorCode.VALIDATION_ERROR,
@@ -69,6 +73,7 @@ export class GenerationService {
     const payloadHash = computePayloadHash({
       promptVersionId: request.promptVersionId,
       values: request.values,
+      prompt: request.prompt,
       durationSeconds: request.durationSeconds,
       aspectRatio: request.aspectRatio,
       resolution: request.resolution,
@@ -97,6 +102,7 @@ export class GenerationService {
     const now = nowIso();
     const parameters = {
       values: request.values,
+      prompt: request.prompt ?? null,
       durationSeconds: request.durationSeconds,
       aspectRatio: request.aspectRatio,
       resolution: request.resolution,
@@ -253,6 +259,7 @@ export class GenerationService {
   ): CreateGenerationRequest {
     const p = original.parameters as {
       values?: Record<string, string>;
+      prompt?: string | null;
       durationSeconds?: number;
       aspectRatio?: string;
       resolution?: string;
@@ -276,6 +283,9 @@ export class GenerationService {
       referenceAudioUrl: p.referenceAudioUrl ?? undefined,
       idempotencyKey,
     };
+    if (p.prompt && p.prompt.length > 0) {
+      request.prompt = p.prompt;
+    }
     if (p.mockScenario) {
       request.mockScenario = p.mockScenario;
     }
@@ -312,6 +322,31 @@ export class GenerationService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Determine the final prompt text item. A non-blank client-supplied `prompt`
+   * override (e.g. the rendered prompt with inserted camera-motion cues) is used
+   * verbatim; otherwise the immutable version is rendered with `values`. Either
+   * way the result is subject to the H3 rendered-character limit by the caller.
+   *
+   * The immutable version is ALWAYS rendered/validated with `values` first —
+   * even when a non-blank override is supplied — so unresolved variables and
+   * template syntax errors still fail BEFORE any job is created or the provider
+   * is called. The validated override then remains the final rendered prompt.
+   * The route layer trims the override via the schema; the `.trim()` guard here
+   * also protects direct/retry callers that may supply a whitespace-only value.
+   */
+  private resolveRenderedPrompt(
+    content: string,
+    values: Record<string, string>,
+    promptOverride: string | undefined,
+  ): string {
+    const renderedFromVersion = this.renderOrFail(content, values);
+    if (promptOverride !== undefined && promptOverride.trim().length > 0) {
+      return promptOverride;
+    }
+    return renderedFromVersion;
   }
 
   /**

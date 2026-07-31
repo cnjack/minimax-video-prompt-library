@@ -22,6 +22,10 @@ configured.
 
 - **Versioned prompt library** — immutable versions, restore-as-new-head,
   duplicate, archive (never delete), full-text + tag/status filters.
+- **H3 camera-motion chips** — one-click camera cues (Pan left/right, Push in,
+  Pull out, Tracking shot, Static shot) insert at the prompt cursor in the
+  generation composer, preserving surrounding text; the cue-augmented prompt is
+  still validated through the H3 policy before submission.
 - **Pure template engine** — `{{variable}}` parsing/rendering with name
   validation (letters, numbers, `_`, `.`, `-`), duplicate normalization, and
   rejection of blank/unresolved variables.
@@ -114,6 +118,44 @@ To exercise failure paths from the UI, pick a **Mock scenario** in the composer
 curl -X PUT localhost:3001/api/debug/mock -H 'Content-Type: application/json' \
   -d '{"scenario":"failure"}'
 ```
+
+---
+
+## Camera-movement preset chips (composer)
+
+MiniMax's H3 guide recommends camera-motion cues (pan, push/pull, tracking,
+static). The generation composer offers them as keyboard-reachable chips so you
+don't have to remember or retype the phrasing:
+
+- Open a prompt version → **Generate from head** to reach the composer.
+- The **Prompt** card lists the chips: **Pan left, Pan right, Push in, Pull out,
+  Tracking shot, Static shot**. Each is a real button (`Tab` to reach, `Enter`/
+  `Space` to activate) with a visible focus ring and a tooltip describing the
+  motion.
+- Activating a chip inserts its token at the current cursor (or replaces the
+  current selection) without disturbing the surrounding text; before you place
+  the cursor it appends at the end. You can then edit the prompt freely.
+- Chips are **disabled until every variable is filled** (a cue inserted into an
+  unresolved prompt would freeze it to only the camera token). Each chip is also
+  keyboard reachable with a visible focus ring and an accessible description of
+  the motion it inserts.
+- While the prompt is untouched it mirrors the rendered template (filling a
+  variable live-updates it). The first chip insert or manual edit freezes it as
+  the source of truth; **Reset to rendered** re-syncs it from the variables.
+- If you change a variable *after* the prompt was frozen, generation is blocked
+  with a clear message because the frozen text would no longer match the recorded
+  values. **Reset to rendered** re-syncs the prompt to the current values (then
+  re-apply any camera cues) to submit a consistent prompt.
+- The exact text shown is what is generated, sent as a `prompt` override and
+  still validated through the existing H3 request policy (the 7000-character
+  limit, duration, ratio, and media rules) before submission. Server-side, the
+  immutable version is *also* validated with the supplied `values` even when an
+  override is present, so an unresolved variable or template error always fails
+  before any job or provider call.
+
+The preset labels and inserted tokens live in one pure, tested module
+(`packages/shared/src/cameraPresets.ts`) so they are not duplicated across the
+UI.
 
 ---
 

@@ -77,6 +77,14 @@ export const createGenerationSchema = z
   .object({
     promptVersionId: idSchema,
     values: z.record(z.string(), z.string()).default({}),
+    /**
+     * Optional fully-rendered prompt override. When a non-empty string is
+     * supplied (e.g. by the composer after inserting camera-motion cues), the
+     * server uses it verbatim as the prompt text item instead of rendering the
+     * immutable prompt version with `values`. It is still subject to the H3
+     * rendered-character limit. Omit/leave blank to render from the version.
+     */
+    prompt: z.string().trim().max(H3_MAX_PROMPT_CHARS).optional(),
     durationSeconds: z
       .number()
       .int()

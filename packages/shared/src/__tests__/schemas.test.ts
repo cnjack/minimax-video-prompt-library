@@ -89,6 +89,19 @@ describe('createGenerationSchema validation', () => {
   it('requires a prompt version id', () => {
     expect(() => createGenerationSchema.parse({ ...base, promptVersionId: '' })).toThrow();
   });
+
+  it('accepts an optional rendered-prompt override and caps it at the H3 limit', () => {
+    expect(() =>
+      createGenerationSchema.parse({ ...base, prompt: 'a car, pan left' }),
+    ).not.toThrow();
+    const at = createGenerationSchema.parse({ ...base, prompt: 'x'.repeat(7000) });
+    expect(at.prompt).toHaveLength(7000);
+    expect(() =>
+      createGenerationSchema.parse({ ...base, prompt: 'x'.repeat(7001) }),
+    ).toThrow();
+    // Blank trims to empty (treated as "no override" by the service).
+    expect(createGenerationSchema.parse({ ...base, prompt: '   ' }).prompt).toBe('');
+  });
 });
 
 describe('createGenerationSchema cross-field + ratio rules (negative)', () => {
