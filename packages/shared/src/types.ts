@@ -37,13 +37,48 @@ export interface PromptVersion {
   createdAt: string;
 }
 
-/** Local job state machine. */
+/**
+ * Local job state machine.
+ *
+ * `queued`/`running` are polled. `succeeded`/`failed`/`expired` are genuine
+ * terminal outcomes (a `failed`/`expired` job may be regenerated as a new paid
+ * job). `tracking_exhausted` is a RECOVERABLE-STALLED outcome: the server gave
+ * up polling after its bounded transient-failure budget, but the provider task
+ * is still assumed alive. It is NOT polled and NOT a genuine terminal — the only
+ * sanctioned recovery is a Resume, which re-polls the SAME stored provider task
+ * id without a paid provider create. See `GenerationService.resume`.
+ */
 export type JobStatus =
   | 'queued'
   | 'running'
   | 'succeeded'
   | 'failed'
-  | 'expired';
+  | 'expired'
+  | 'tracking_exhausted';
+
+/**
+ * Status buckets shared by the server (poller/repository) and the client (UI),
+ * so the recoverable `tracking_exhausted` outcome is classified identically on
+ * both sides and never drifts.
+ */
+/** Genuine terminal statuses: a finished job that must never be revived. */
+export const GENUINE_TERMINAL_STATUSES: readonly JobStatus[] = [
+  'succeeded',
+  'failed',
+  'expired',
+];
+/** Recoverable-stalled statuses: not polled, but resumable with no paid create. */
+export const RECOVERABLE_STALLED_STATUSES: readonly JobStatus[] = [
+  'tracking_exhausted',
+];
+
+export function isGenuineTerminalStatus(status: JobStatus): boolean {
+  return (GENUINE_TERMINAL_STATUSES as readonly string[]).includes(status);
+}
+
+export function isRecoverableStalledStatus(status: JobStatus): boolean {
+  return (RECOVERABLE_STALLED_STATUSES as readonly string[]).includes(status);
+}
 
 /** Which adapter produced this job. */
 export type ProviderName = 'mock' | 'minimax';

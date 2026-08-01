@@ -22,7 +22,7 @@ const SAMPLES: Sample[] = [
     tags: ['product', 'cinematic', 'hero'],
     status: 'active',
     content:
-      'Cinematic 2K product film of {{product}} placed in {{setting}}. ' +
+      'Cinematic product film of {{product}} placed in {{setting}}. ' +
       'Slow dolly-in, volumetric light, shallow depth of field, a {{mood}} color grade, ' +
       'subtle particles drifting through the air, ultra-detailed, photoreal.',
   },
@@ -43,7 +43,7 @@ const SAMPLES: Sample[] = [
     status: 'draft',
     content:
       'A stylized character introduction: {{character}} {{action}}. ' +
-      'Dynamic camera move, dramatic rim lighting, film grain, cinematic 2K, ' +
+      'Dynamic camera move, dramatic rim lighting, film grain, cinematic, ' +
       'confident pacing, shallow focus on the subject.',
   },
 ];

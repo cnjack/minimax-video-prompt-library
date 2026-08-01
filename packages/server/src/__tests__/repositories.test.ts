@@ -42,10 +42,10 @@ function baseJob(overrides: Record<string, unknown> = {}) {
     promptId: p.id,
     promptVersionId: v.id,
     renderedPrompt: 'rendered',
-    model: 'MiniMax-H3',
+    model: 'MiniMax-Hailuo-2.3',
     durationSeconds: 6,
-    aspectRatio: '16:9',
-    resolution: '2K',
+    aspectRatio: 'native',
+    resolution: '768P',
     firstFrameUrl: null,
     lastFrameUrl: null,
     referenceImageUrl: null,
@@ -111,6 +111,48 @@ describe('JobRepository', () => {
   it('creates and retrieves a job', () => {
     const job = baseJob();
     expect(jobs.getById(job.id)?.status).toBe('queued');
+  });
+
+  it('reads back historical (legacy-contract) job rows without loss', () => {
+    // A job persisted under the obsolete H3/v2 contract (old model, an aspect
+    // ratio, 2K resolution, reference media, a pre-Hailuo duration) must remain
+    // fully readable after the provider correction — only new submissions change.
+    const legacy = jobs.create({
+      id: newId(),
+      promptId: makePrompt().id,
+      promptVersionId: versions.create({ id: newId(), promptId: makePrompt().id, content: 'x', now: nowIso() }).id,
+      renderedPrompt: 'legacy rendered',
+      model: 'MiniMax-H3',
+      durationSeconds: 8,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      firstFrameUrl: 'https://e.com/ff.png',
+      lastFrameUrl: 'https://e.com/lf.png',
+      referenceImageUrl: 'https://e.com/ri.png',
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'succeeded',
+      provider: 'mock',
+      providerTaskId: 'legacy-task',
+      resultUrl: 'https://x/legacy.mp4',
+      errorCode: null,
+      errorMessage: null,
+      idempotencyKey: 'legacy-key',
+      idempotencyPayloadHash: 'legacy-hash',
+      parameters: { legacy: true },
+      now: nowIso(),
+    });
+    const read = jobs.getById(legacy.id);
+    expect(read?.model).toBe('MiniMax-H3');
+    expect(read?.aspectRatio).toBe('16:9');
+    expect(read?.resolution).toBe('2K');
+    expect(read?.durationSeconds).toBe(8);
+    expect(read?.firstFrameUrl).toBe('https://e.com/ff.png');
+    expect(read?.lastFrameUrl).toBe('https://e.com/lf.png');
+    expect(read?.referenceImageUrl).toBe('https://e.com/ri.png');
+    expect(read?.status).toBe('succeeded');
+    expect(read?.resultUrl).toBe('https://x/legacy.mp4');
+    expect((read?.parameters as { legacy?: boolean }).legacy).toBe(true);
   });
 
   it('finds jobs by idempotency key', () => {
@@ -202,6 +244,64 @@ describe('JobRepository.updateStatus compare-and-set guard', () => {
     });
     expect(outcome.lostUpdate).toBe(false);
     expect(outcome.job?.status).toBe('succeeded');
+  });
+});
+
+describe('JobRepository tracking-exhausted + resumeTracking', () => {
+  it('listNonTerminal excludes tracking_exhausted (a stalled job is not polled)', () => {
+    const queued = baseJob();
+    const stalled = baseJob({ status: 'tracking_exhausted', providerTaskId: 'pt' });
+    const ids = jobs.listNonTerminal().map((j) => j.id);
+    expect(ids).toContain(queued.id);
+    expect(ids).not.toContain(stalled.id);
+  });
+
+  it('updateStatus refuses a non-terminal write to a tracking_exhausted row (lostUpdate)', () => {
+    // A stale poll must not silently revive a stalled row back to running — only
+    // the dedicated resumeTracking path may do that.
+    const stalled = baseJob({ status: 'tracking_exhausted', providerTaskId: 'pt' });
+    const outcome = jobs.updateStatus(stalled.id, { status: 'running', now: nowIso() });
+    expect(outcome.lostUpdate).toBe(true);
+    expect(outcome.job?.status).toBe('tracking_exhausted'); // unchanged
+  });
+
+  it('resumeTracking revives a tracking_exhausted job (with a task id) to running and clears the stale error', () => {
+    const stalled = baseJob({
+      status: 'tracking_exhausted',
+      providerTaskId: 'pt-x',
+      errorCode: 'rate_limit',
+      errorMessage: 'paused',
+    });
+    const { job, resumed } = jobs.resumeTracking(stalled.id, nowIso());
+    expect(resumed).toBe(true);
+    expect(job?.status).toBe('running');
+    expect(job?.errorCode).toBeNull(); // stale tracking error cleared
+    expect(job?.errorMessage).toBeNull();
+    expect(job?.providerTaskId).toBe('pt-x'); // SAME stored task id
+  });
+
+  it('resumeTracking is idempotent: a second resume is a safe no-op (resumed=false)', () => {
+    const stalled = baseJob({ status: 'tracking_exhausted', providerTaskId: 'pt' });
+    expect(jobs.resumeTracking(stalled.id, nowIso()).resumed).toBe(true);
+    const second = jobs.resumeTracking(stalled.id, nowIso());
+    expect(second.resumed).toBe(false); // row is now running
+    expect(second.job?.status).toBe('running');
+  });
+
+  it('resumeTracking never revives a genuine-terminal row', () => {
+    const failed = baseJob({ status: 'failed', providerTaskId: 'pt' });
+    const succeeded = baseJob({ status: 'succeeded', providerTaskId: 'pt-s', resultUrl: 'https://x/y.mp4' });
+    expect(jobs.resumeTracking(failed.id, nowIso()).resumed).toBe(false);
+    expect(jobs.resumeTracking(succeeded.id, nowIso()).resumed).toBe(false);
+    expect(jobs.getById(failed.id)?.status).toBe('failed');
+    expect(jobs.getById(succeeded.id)?.status).toBe('succeeded');
+  });
+
+  it('resumeTracking refuses a tracking_exhausted row with no stored provider task id', () => {
+    const stalled = baseJob({ status: 'tracking_exhausted', providerTaskId: null });
+    const { job, resumed } = jobs.resumeTracking(stalled.id, nowIso());
+    expect(resumed).toBe(false);
+    expect(job?.status).toBe('tracking_exhausted'); // cannot resume without a task id
   });
 });
 

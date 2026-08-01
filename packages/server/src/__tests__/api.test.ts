@@ -21,7 +21,7 @@ const config: AppConfig = {
   dbPath: ':memory:',
   providerMode: 'mock',
   minimaxApiKey: null,
-  minimaxBaseUrl: 'https://api.minimaxi.com',
+  minimaxBaseUrl: 'https://api.minimax.io',
   minimaxGroupId: null,
   pollIntervalMs: 1000,
   pollMaxAttempts: 5,
@@ -113,8 +113,7 @@ describe('Core generation path', () => {
         promptVersionId: versionId,
         values: { subject: 'a car' },
         durationSeconds: 6,
-        aspectRatio: '16:9',
-        resolution: '2K',
+        resolution: '768P',
         idempotencyKey: 'api-key-1',
       })
       .expect(201);
@@ -143,8 +142,7 @@ describe('Core generation path', () => {
         promptVersionId: versionId,
         values: { subject: 'a car' },
         durationSeconds: 6,
-        aspectRatio: '16:9',
-        resolution: '2K',
+        resolution: '768P',
         idempotencyKey: 'api-key-1',
       })
       .expect(200);
@@ -161,13 +159,13 @@ describe('Core generation path', () => {
 
     const badDuration = await request(app)
       .post('/api/generations')
-      .send({ promptVersionId: versionId, values: {}, durationSeconds: 3, aspectRatio: '16:9', resolution: '2K' });
+      .send({ promptVersionId: versionId, values: {}, durationSeconds: 3, resolution: '768P' });
     expect(badDuration.status).toBe(400);
     expect(badDuration.body.error.code).toBe('validation_error');
 
     const badUrl = await request(app)
       .post('/api/generations')
-      .send({ promptVersionId: versionId, values: {}, durationSeconds: 4, aspectRatio: '16:9', resolution: '2K', firstFrameUrl: 'ftp://x/y.png' });
+      .send({ promptVersionId: versionId, values: {}, durationSeconds: 6, resolution: '768P', firstFrameUrl: 'ftp://x/y.png' });
     expect(badUrl.status).toBe(400);
   });
 
@@ -181,9 +179,8 @@ describe('Core generation path', () => {
     const base = {
       promptVersionId: versionId,
       values: { a: '1' },
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
       idempotencyKey: 'conflict-key',
     };
     await request(app).post('/api/generations').send(base).expect(201);
@@ -226,8 +223,8 @@ describe('Core generation path', () => {
   });
 });
 
-describe('aspect ratio / frame mode API rejection', () => {
-  it('rejects first-frame mode with a concrete ratio (requires adaptive)', async () => {
+describe('Hailuo-2.3 API contract enforcement', () => {
+  it('rejects an unsupported aspect ratio (no ratio parameter)', async () => {
     const created = await request(app)
       .post('/api/prompts')
       .send({ name: 'P', content: 'x' })
@@ -239,16 +236,54 @@ describe('aspect ratio / frame mode API rejection', () => {
       .send({
         promptVersionId: versionId,
         values: {},
-        durationSeconds: 5,
+        durationSeconds: 6,
         aspectRatio: '16:9',
-        resolution: '2K',
-        firstFrameUrl: 'https://example.com/a.png',
+        resolution: '768P',
       });
     expect(bad.status).toBe(400);
     expect(bad.body.error.code).toBe('validation_error');
   });
 
-  it('accepts first-frame mode with adaptive', async () => {
+  it('rejects 10s at 1080P (10s only at 768P)', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    const versionId = created.body.versions[0].id as string;
+
+    const bad = await request(app)
+      .post('/api/generations')
+      .send({
+        promptVersionId: versionId,
+        values: {},
+        durationSeconds: 10,
+        resolution: '1080P',
+      });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error.code).toBe('validation_error');
+  });
+
+  it('rejects unsupported reference media', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    const versionId = created.body.versions[0].id as string;
+
+    const bad = await request(app)
+      .post('/api/generations')
+      .send({
+        promptVersionId: versionId,
+        values: {},
+        durationSeconds: 6,
+        resolution: '768P',
+        referenceImageUrl: 'https://example.com/c.png',
+      });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error.code).toBe('validation_error');
+  });
+
+  it('accepts first-frame image-to-video', async () => {
     const created = await request(app)
       .post('/api/prompts')
       .send({ name: 'P', content: 'x' })
@@ -260,9 +295,8 @@ describe('aspect ratio / frame mode API rejection', () => {
       .send({
         promptVersionId: versionId,
         values: {},
-        durationSeconds: 5,
-        aspectRatio: 'adaptive',
-        resolution: '2K',
+        durationSeconds: 6,
+        resolution: '1080P',
         firstFrameUrl: 'https://example.com/a.png',
       })
       .expect(201);
@@ -276,10 +310,10 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
       promptId,
       promptVersionId: versionId,
       renderedPrompt: 'x',
-      model: 'MiniMax-H3',
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
       firstFrameUrl: null,
       lastFrameUrl: null,
       referenceImageUrl: null,
@@ -307,9 +341,8 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
     const versionId = created.body.versions[0].id as string;
     const failed = plantFailedJob(promptId, versionId, 'src-failed', {
       values: {},
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
       mockScenario: 'success',
     });
 
@@ -351,7 +384,7 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
       created.body.prompt.id,
       created.body.versions[0].id,
       'src-failed-bad',
-      { values: {}, durationSeconds: 5, aspectRatio: '16:9', resolution: '2K', mockScenario: 'success' },
+      { values: {}, durationSeconds: 6, resolution: '768P', mockScenario: 'success' },
     );
     // A header containing a space is not a valid bounded token.
     const bad = await request(app)
@@ -367,12 +400,13 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
       .post('/api/prompts')
       .send({ name: 'P', content: 'x' })
       .expect(201);
-    // Corrupt persisted params: an unsupported aspect ratio and missing duration.
+    // Corrupt persisted params: missing duration (cannot retry under the
+    // current model contract).
     const failed = plantFailedJob(
       created.body.prompt.id,
       created.body.versions[0].id,
       'src-failed-corrupt',
-      { values: {}, aspectRatio: 'bogus', resolution: '2K' },
+      { values: {}, resolution: '768P' },
     );
 
     const res = await request(app)
@@ -382,6 +416,122 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
     expect(res.body.error.code).toBe('unprocessable');
     // No new job was created (only the corrupt source remains).
     expect(jobs.list({ limit: 100 })).toHaveLength(1);
+  });
+});
+
+describe('resume tracking-exhausted jobs (no paid create)', () => {
+  function plantTrackingExhausted(
+    promptId: string,
+    versionId: string,
+    id: string,
+    providerTaskId: string | null = `task-${id}`,
+  ) {
+    return jobs.create({
+      id,
+      promptId,
+      promptVersionId: versionId,
+      renderedPrompt: 'x',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'tracking_exhausted',
+      provider: 'mock',
+      providerTaskId,
+      resultUrl: null,
+      errorCode: 'rate_limit',
+      errorMessage: 'Tracking paused.',
+      idempotencyKey: `src-${id}`,
+      idempotencyPayloadHash: `h-${id}`,
+      parameters: { values: {}, durationSeconds: 6, resolution: '768P', mockScenario: 'success' },
+      now: nowIso(),
+    });
+  }
+
+  it('resumes a tracking-exhausted job to running (200), reusing the SAME task and creating NO new job', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const job = plantTrackingExhausted(created.body.prompt.id, created.body.versions[0].id, 'src-te');
+    const countBefore = jobs.list({ limit: 100 }).length;
+
+    const res = await request(app).post(`/api/generations/${job.id}/resume`).expect(200);
+    expect(res.body.status).toBe('running');
+    expect(res.body.providerTaskId).toBe('task-src-te'); // SAME provider task id
+    // No new job created; the existing row was revived.
+    expect(jobs.list({ limit: 100 })).toHaveLength(countBefore);
+    expect(jobs.getById(job.id)?.status).toBe('running');
+    expect(jobs.getById(job.id)?.errorCode).toBeNull();
+  });
+
+  it('resume is idempotent: a repeated resume resolves to the running row (200)', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const job = plantTrackingExhausted(created.body.prompt.id, created.body.versions[0].id, 'src-te-idem');
+    await request(app).post(`/api/generations/${job.id}/resume`).expect(200);
+    const second = await request(app).post(`/api/generations/${job.id}/resume`).expect(200);
+    expect(second.body.status).toBe('running');
+  });
+
+  it('rejects resume for a genuine terminal (failed) job with 422', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const failed = jobs.create({
+      id: 'src-te-failed',
+      promptId: created.body.prompt.id,
+      promptVersionId: created.body.versions[0].id,
+      renderedPrompt: 'x',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'failed',
+      provider: 'mock',
+      providerTaskId: 'task-failed',
+      resultUrl: null,
+      errorCode: 'provider_failure',
+      errorMessage: 'boom',
+      idempotencyKey: 'k-te-failed',
+      idempotencyPayloadHash: 'h-te-failed',
+      parameters: {},
+      now: nowIso(),
+    });
+    const res = await request(app).post(`/api/generations/${failed.id}/resume`);
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('unprocessable');
+    expect(jobs.getById(failed.id)?.status).toBe('failed'); // never revived
+  });
+
+  it('rejects resume for a tracking-exhausted job with no provider task id with 422', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const noTask = plantTrackingExhausted(
+      created.body.prompt.id,
+      created.body.versions[0].id,
+      'src-te-notask',
+      null,
+    );
+    const res = await request(app).post(`/api/generations/${noTask.id}/resume`);
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('unprocessable');
+  });
+
+  it('rejects paid retry-as-new for a tracking-exhausted job with 422 (must resume instead)', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const job = plantTrackingExhausted(created.body.prompt.id, created.body.versions[0].id, 'src-te-retry');
+    const countBefore = jobs.list({ limit: 100 }).length;
+    const res = await request(app)
+      .post(`/api/generations/${job.id}/retry`)
+      .set('Idempotency-Key', 'T-te');
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('unprocessable');
+    // No new paid job was created.
+    expect(jobs.list({ limit: 100 })).toHaveLength(countBefore);
   });
 });
 

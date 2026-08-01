@@ -6,14 +6,12 @@
 
 import { z } from 'zod';
 import {
-  H3_ASPECT_RATIOS,
-  H3_MAX_DURATION_SECONDS,
-  H3_MAX_PROMPT_CHARS,
-  H3_MIN_DURATION_SECONDS,
-  H3_RESOLUTIONS,
-  validateMediaCombination,
-  validateRatioForMode,
-} from './h3-policy.js';
+  MINIMAX_DURATIONS,
+  MINIMAX_MAX_PROMPT_CHARS,
+  MINIMAX_RESOLUTIONS,
+  isDurationResolutionCompatible,
+  validateDurationResolution,
+} from './video-policy.js';
 import { VARIABLE_NAME_PATTERN } from './template.js';
 
 /** Accept only http(s) URLs for externally-referenced media. */
@@ -30,7 +28,10 @@ const httpUrl = z
     }
   }, 'Must be an absolute http(s) URL');
 
-const optionalUrl = z.union([httpUrl, z.literal('')]).optional().transform((v) => (v && v.length > 0 ? v : undefined));
+const optionalUrl = z
+  .union([httpUrl, z.literal('')])
+  .optional()
+  .transform((v) => (v && v.length > 0 ? v : undefined));
 
 const idSchema = z.string().trim().min(1);
 
@@ -73,6 +74,23 @@ export const renderPreviewSchema = z.object({
 });
 export type RenderPreviewRequest = z.infer<typeof renderPreviewSchema>;
 
+/**
+ * Fields that MiniMax-Hailuo-2.3 does NOT support. They are declared (as plain
+ * optional strings) only so the schema can VISIBLY REJECT a non-empty value
+ * with a clear message — silently dropping them would hide an unsupported
+ * request. The inferred request type marks them optional/deprecated.
+ */
+const UNSUPPORTED_MEDIA_FIELDS = {
+  aspectRatio: 'Aspect ratio is not supported by MiniMax-Hailuo-2.3.',
+  lastFrameUrl: 'Last-frame media is not supported by MiniMax-Hailuo-2.3.',
+  referenceImageUrl:
+    'Reference-image media is not supported by MiniMax-Hailuo-2.3.',
+  referenceVideoUrl:
+    'Reference-video media is not supported by MiniMax-Hailuo-2.3.',
+  referenceAudioUrl:
+    'Reference-audio media is not supported by MiniMax-Hailuo-2.3.',
+} as const;
+
 export const createGenerationSchema = z
   .object({
     promptVersionId: idSchema,
@@ -80,23 +98,27 @@ export const createGenerationSchema = z
     /**
      * Optional fully-rendered prompt override. When a non-empty string is
      * supplied (e.g. by the composer after inserting camera-motion cues), the
-     * server uses it verbatim as the prompt text item instead of rendering the
-     * immutable prompt version with `values`. It is still subject to the H3
-     * rendered-character limit. Omit/leave blank to render from the version.
+     * server uses it verbatim as the `prompt` instead of rendering the
+     * immutable prompt version with `values`. It is still subject to the
+     * MiniMax rendered-character limit. Omit/leave blank to render from the
+     * version.
      */
-    prompt: z.string().trim().max(H3_MAX_PROMPT_CHARS).optional(),
+    prompt: z.string().trim().max(MINIMAX_MAX_PROMPT_CHARS).optional(),
     durationSeconds: z
       .number()
       .int()
-      .min(H3_MIN_DURATION_SECONDS)
-      .max(H3_MAX_DURATION_SECONDS),
-    aspectRatio: z.enum(H3_ASPECT_RATIOS),
-    resolution: z.enum(H3_RESOLUTIONS),
+      .refine((v) => (MINIMAX_DURATIONS as readonly number[]).includes(v), {
+        message: 'durationSeconds must be 6 or 10.',
+      }),
+    resolution: z.enum(MINIMAX_RESOLUTIONS),
+    /** First-frame image-to-video (MiniMax-Hailuo-2.3 `first_frame_image`). */
     firstFrameUrl: optionalUrl,
-    lastFrameUrl: optionalUrl,
-    referenceImageUrl: optionalUrl,
-    referenceVideoUrl: optionalUrl,
-    referenceAudioUrl: optionalUrl,
+    // Deprecated/unsupported fields — visibly rejected if supplied (see above).
+    aspectRatio: z.string().optional(),
+    lastFrameUrl: z.string().optional(),
+    referenceImageUrl: z.string().optional(),
+    referenceVideoUrl: z.string().optional(),
+    referenceAudioUrl: z.string().optional(),
     idempotencyKey: z.string().trim().min(1).max(200).optional(),
     /** Honored only in mock mode; ignored by the real adapter. */
     mockScenario: z
@@ -104,50 +126,49 @@ export const createGenerationSchema = z
       .optional(),
   })
   .superRefine((data, ctx) => {
-    // H3 media cross-field rules (shared with the UI via the policy module).
-    const mediaErrors = validateMediaCombination({
-      firstFrameUrl: data.firstFrameUrl,
-      lastFrameUrl: data.lastFrameUrl,
-      referenceImageUrl: data.referenceImageUrl,
-      referenceVideoUrl: data.referenceVideoUrl,
-      referenceAudioUrl: data.referenceAudioUrl,
-    });
-    for (const err of mediaErrors) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: err.message,
-        path: [err.field],
-      });
+    // Visibly disable unsupported options: a non-empty value is a 400.
+    for (const [field, message] of Object.entries(UNSUPPORTED_MEDIA_FIELDS)) {
+      const value = (data as Record<string, unknown>)[field];
+      if (typeof value === 'string' && value.trim().length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message,
+          path: [field],
+        });
+      }
     }
-    // Conditional ratio behavior: text-to-video cannot use "adaptive".
-    const ratioError = validateRatioForMode(data.aspectRatio, {
-      firstFrameUrl: data.firstFrameUrl,
-      lastFrameUrl: data.lastFrameUrl,
-      referenceImageUrl: data.referenceImageUrl,
-      referenceVideoUrl: data.referenceVideoUrl,
-      referenceAudioUrl: data.referenceAudioUrl,
-    });
-    if (ratioError) {
+    // Duration/resolution cross-field rule: 10s only at 768P.
+    if (!isDurationResolutionCompatible(data.durationSeconds, data.resolution)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: ratioError.message,
-        path: ['aspectRatio'],
+        message:
+          validateDurationResolution(data.durationSeconds, data.resolution)
+            ?.message ??
+          'The chosen duration/resolution combination is not supported.',
+        path: ['resolution'],
       });
     }
   });
 export type CreateGenerationRequest = z.infer<typeof createGenerationSchema>;
 
 /**
- * Maximum length of the rendered prompt text item sent to H3. Re-exported here
- * so callers that only depend on the schema module can enforce it server-side
+ * Maximum length of the rendered prompt sent to MiniMax. Re-exported here so
+ * callers that only depend on the schema module can enforce it server-side
  * after variable substitution (the schema cannot, because rendering happens
  * after validation).
  */
-export const MAX_RENDERED_PROMPT_CHARS = H3_MAX_PROMPT_CHARS;
+export const MAX_RENDERED_PROMPT_CHARS = MINIMAX_MAX_PROMPT_CHARS;
 
 export const listJobsQuerySchema = z.object({
   status: z
-    .enum(['queued', 'running', 'succeeded', 'failed', 'expired'])
+    .enum([
+      'queued',
+      'running',
+      'succeeded',
+      'failed',
+      'expired',
+      'tracking_exhausted',
+    ])
     .optional(),
   promptId: idSchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),

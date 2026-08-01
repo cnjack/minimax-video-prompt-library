@@ -53,5 +53,17 @@ export function createJobsRouter(services: AppServices): Router {
     }),
   );
 
+  router.post(
+    '/:id/resume',
+    asyncHandler(async (req, res) => {
+      // Resume tracking-exhausted jobs: re-enable polling of the SAME stored
+      // provider task id with NO paid provider create. It takes no idempotency
+      // key (it is not a paid create) and is idempotent/concurrency-safe by
+      // construction (the repository transition is a single atomic CAS).
+      const job = services.generations.resume(routeParam(req, 'id'));
+      res.status(200).json(job);
+    }),
+  );
+
   return router;
 }

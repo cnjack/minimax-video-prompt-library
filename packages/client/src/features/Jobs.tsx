@@ -3,12 +3,23 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { GenerationJob, JobStatus } from '@h3/shared';
+import {
+  GENUINE_TERMINAL_STATUSES,
+  RECOVERABLE_STALLED_STATUSES,
+} from '@h3/shared';
 import { api, ApiClientError } from '../api/client.js';
 import { useNav } from '../nav.js';
 import { newRequestId } from '../util.js';
 import { Badge, CenterState, ErrorBanner, Spinner } from '../components.js';
 
-const TERMINAL: JobStatus[] = ['succeeded', 'failed', 'expired'];
+const TERMINAL: JobStatus[] = [...GENUINE_TERMINAL_STATUSES];
+// Statuses for which the detail view stops auto-polling the server: genuine
+// terminal outcomes plus the recoverable-stalled tracking-exhausted state
+// (nothing changes server-side until the user resumes tracking).
+const STOP_POLLING: JobStatus[] = [
+  ...GENUINE_TERMINAL_STATUSES,
+  ...RECOVERABLE_STALLED_STATUSES,
+];
 const POLL_MS = 2000;
 
 export function JobsList() {
@@ -71,6 +82,7 @@ export function JobsList() {
           <option value="succeeded">Succeeded</option>
           <option value="failed">Failed</option>
           <option value="expired">Expired</option>
+          <option value="tracking_exhausted">Tracking paused</option>
         </select>
         <span className="muted grow" style={{ textAlign: 'right' }}>
           Auto-refreshing every {POLL_MS / 1000}s
@@ -97,7 +109,7 @@ export function JobsList() {
               <div>
                 <Badge status={j.status} pulse={j.status === 'running'} />
                 <div className="muted" style={{ marginTop: 4 }}>
-                  {j.model} · {j.durationSeconds}s · {j.aspectRatio}
+                  {j.model} · {j.durationSeconds}s · {j.resolution}
                   {' · '}
                   {new Date(j.createdAt).toLocaleString()}
                 </div>
@@ -149,6 +161,11 @@ export function JobDetail({ jobId }: { jobId: string }) {
   const [job, setJob] = useState<GenerationJob | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  // Bumped after a successful resume to restart the polling lifecycle for a job
+  // that was tracking-exhausted (its timer had stopped). Keying the polling
+  // effect on this lets a resumed job auto-refresh through running -> succeeded.
+  const [pollEpoch, setPollEpoch] = useState(0);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Mirror the current jobId into a ref on every render so an in-flight retry()
@@ -180,7 +197,7 @@ export function JobDetail({ jobId }: { jobId: string }) {
         if (cancelled) return;
         setJob(j);
         setError(null);
-        if (TERMINAL.includes(j.status) && timer.current) {
+        if (STOP_POLLING.includes(j.status) && timer.current) {
           clearInterval(timer.current);
           timer.current = null;
         }
@@ -200,7 +217,7 @@ export function JobDetail({ jobId }: { jobId: string }) {
         timer.current = null;
       }
     };
-  }, [jobId]);
+  }, [jobId, pollEpoch]);
 
   async function retry() {
     if (retrying) return;
@@ -234,7 +251,7 @@ export function JobDetail({ jobId }: { jobId: string }) {
         // that returned an already-failed retried job). Do NOT silently navigate
         // to a stale failed job; surface it and let the user retry again.
         setError(
-          `This retry already finished (${result.job.status}). Click retry to start a fresh job.`,
+          `This regeneration already finished (${result.job.status}). Click Regenerate to start a fresh job.`,
         );
       }
     } catch (e) {
@@ -251,10 +268,34 @@ export function JobDetail({ jobId }: { jobId: string }) {
     }
   }
 
+  // Resume a tracking-exhausted job: re-poll the SAME stored provider task id
+  // with NO paid provider create. On success the job is running again, so the
+  // polling lifecycle is restarted (it had stopped while stalled) to reflect the
+  // eventual outcome. Like retry(), a resume that settles after navigation must
+  // not touch the now-current job's visible state.
+  async function resumeTracking() {
+    if (resuming) return;
+    const attemptJobId = jobId;
+    setResuming(true);
+    setError(null);
+    try {
+      const updated = await api.resumeJob(attemptJobId);
+      if (attemptJobId !== jobIdRef.current) return;
+      setJob(updated);
+      setPollEpoch((n) => n + 1);
+    } catch (e) {
+      if (attemptJobId === jobIdRef.current) {
+        setError(e instanceof ApiClientError ? e.message : 'Failed to resume tracking.');
+      }
+    } finally {
+      if (attemptJobId === jobIdRef.current) {
+        setResuming(false);
+      }
+    }
+  }
+
   if (error && !job) return <ErrorBanner message={error} />;
   if (!job) return <Spinner label="Loading job…" />;
-
-  const isTerminal = TERMINAL.includes(job.status);
 
   return (
     <>
@@ -270,7 +311,12 @@ export function JobDetail({ jobId }: { jobId: string }) {
         <div className="actions">
           {(job.status === 'failed' || job.status === 'expired') && (
             <button className="btn" onClick={retry} disabled={retrying}>
-              {retrying ? 'Retrying…' : '↻ Retry as new job'}
+              {retrying ? 'Regenerating…' : '↻ Regenerate'}
+            </button>
+          )}
+          {job.status === 'tracking_exhausted' && (
+            <button className="btn" onClick={resumeTracking} disabled={resuming}>
+              {resuming ? 'Resuming…' : '▶ Resume tracking'}
             </button>
           )}
         </div>
@@ -278,7 +324,7 @@ export function JobDetail({ jobId }: { jobId: string }) {
 
       {error ? <ErrorBanner message={error} /> : null}
 
-      {!isTerminal ? (
+      {job.status === 'queued' || job.status === 'running' ? (
         <div className="card">
           <Spinner label={`Job is ${job.status}. Waiting for updates…`} />
         </div>
@@ -296,7 +342,10 @@ export function JobDetail({ jobId }: { jobId: string }) {
         </div>
       ) : null}
 
-      {(job.status === 'failed' || job.status === 'expired') && job.errorMessage ? (
+      {(job.status === 'failed' ||
+        job.status === 'expired' ||
+        job.status === 'tracking_exhausted') &&
+      job.errorMessage ? (
         <div className="card">
           <div className="section-title">Outcome</div>
           <ErrorBanner message={job.errorMessage} code={job.errorCode ?? undefined} />
@@ -316,8 +365,6 @@ export function JobDetail({ jobId }: { jobId: string }) {
           <dd>{job.model}</dd>
           <dt>Duration</dt>
           <dd>{job.durationSeconds}s</dd>
-          <dt>Aspect ratio</dt>
-          <dd>{job.aspectRatio}</dd>
           <dt>Resolution</dt>
           <dd>{job.resolution}</dd>
           <dt>Created</dt>

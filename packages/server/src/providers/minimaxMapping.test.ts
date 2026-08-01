@@ -1,34 +1,31 @@
 import { describe, expect, it } from 'vitest';
 import { ProviderErrorCategory } from '@h3/shared';
 import {
+  baseRespFailure,
+  classifyBaseResp,
   classifyHttpFailure,
-  classifyTaskFailureCategory,
-  extractResultUrl,
-  extractTaskFailure,
+  extractDownloadUrl,
+  extractFileId,
   extractTaskId,
+  isBaseRespError,
   isTerminalStatus,
   mapQueryResult,
   mapTaskStatus,
+  readBaseResp,
 } from './minimaxMapping.js';
 
-describe('mapTaskStatus', () => {
-  it('maps the documented H3 V2 statuses', () => {
-    expect(mapTaskStatus('queued')).toBe('queued');
-    expect(mapTaskStatus('running')).toBe('running');
-    expect(mapTaskStatus('succeeded')).toBe('succeeded');
-    expect(mapTaskStatus('failed')).toBe('failed');
-    expect(mapTaskStatus('expired')).toBe('expired');
-  });
-
-  it('maps cancelled/canceled to a terminal failed state (no silent forever-poll)', () => {
-    expect(mapTaskStatus('cancelled')).toBe('failed');
-    expect(mapTaskStatus('Canceled')).toBe('failed');
-    expect(isTerminalStatus(mapTaskStatus('cancelled'))).toBe(true);
-  });
-
-  it('is case-insensitive and tolerates the success alias', () => {
+describe('mapTaskStatus (flat Hailuo-2.3 status)', () => {
+  it('maps the documented official states', () => {
+    expect(mapTaskStatus('Preparing')).toBe('queued');
+    expect(mapTaskStatus('Queueing')).toBe('queued');
+    expect(mapTaskStatus('Processing')).toBe('running');
     expect(mapTaskStatus('Success')).toBe('succeeded');
-    expect(mapTaskStatus('RUNNING')).toBe('running');
+    expect(mapTaskStatus('Fail')).toBe('failed');
+  });
+
+  it('is case-insensitive', () => {
+    expect(mapTaskStatus('success')).toBe('succeeded');
+    expect(mapTaskStatus('PROCESSING')).toBe('running');
   });
 
   it('defaults unknown states to running (bounded attempts guarantee termination)', () => {
@@ -46,251 +43,210 @@ describe('isTerminalStatus', () => {
   });
 });
 
-describe('classifyHttpFailure (OpenAI-style envelope)', () => {
-  const envelope = (http_code: number, message = 'msg', type = 'error') => ({
-    type: 'error',
-    error: { type, message, http_code },
-    request_id: 'req-1',
+describe('base_resp handling', () => {
+  it('reads base_resp.status_code / status_msg', () => {
+    expect(
+      readBaseResp({ base_resp: { status_code: 0, status_msg: 'success' } }),
+    ).toEqual({ statusCode: 0, statusMsg: 'success' });
+    expect(readBaseResp({})).toEqual({});
   });
 
-  it('classifies 400 as invalid_request', () => {
-    expect(
-      classifyHttpFailure({ status: 400, body: envelope(400) }).category,
-    ).toBe(ProviderErrorCategory.INVALID_REQUEST);
+  it('treats a nonzero status_code as an error', () => {
+    expect(isBaseRespError({ base_resp: { status_code: 0 } })).toBe(false);
+    expect(isBaseRespError({ base_resp: { status_code: 1004 } })).toBe(true);
+    expect(isBaseRespError({})).toBe(false);
   });
 
-  it('classifies 401 as auth', () => {
-    expect(
-      classifyHttpFailure({ status: 401, body: envelope(401) }).category,
-    ).toBe(ProviderErrorCategory.AUTH);
+  it('classifies the documented base_resp codes', () => {
+    expect(classifyBaseResp(1004)).toBe(ProviderErrorCategory.AUTH);
+    expect(classifyBaseResp(1002)).toBe(ProviderErrorCategory.RATE_LIMIT);
+    expect(classifyBaseResp(1026)).toBe(ProviderErrorCategory.CONTENT_MODERATION);
+    expect(classifyBaseResp(1027)).toBe(ProviderErrorCategory.CONTENT_MODERATION);
+    expect(classifyBaseResp(9999)).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
   });
 
-  it('classifies 402 as insufficient_balance', () => {
+  it('builds a typed failure from a nonzero base_resp', () => {
     expect(
-      classifyHttpFailure({ status: 402, body: envelope(402) }).category,
-    ).toBe(ProviderErrorCategory.INSUFFICIENT_BALANCE);
-  });
-
-  it('classifies 422 as content_moderation', () => {
-    expect(
-      classifyHttpFailure({ status: 422, body: envelope(422) }).category,
-    ).toBe(ProviderErrorCategory.CONTENT_MODERATION);
-  });
-
-  it('classifies 429 as rate_limit', () => {
-    expect(
-      classifyHttpFailure({ status: 429, body: envelope(429) }).category,
-    ).toBe(ProviderErrorCategory.RATE_LIMIT);
-  });
-
-  it('classifies 500 and 529 as provider_failure', () => {
-    expect(
-      classifyHttpFailure({ status: 500, body: envelope(500) }).category,
-    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
-    expect(
-      classifyHttpFailure({ status: 529, body: envelope(529) }).category,
-    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
-  });
-
-  it('uses the envelope message', () => {
-    const r = classifyHttpFailure({ status: 401, body: envelope(401, 'bad key') });
-    expect(r.message).toBe('bad key');
-  });
-
-  it('falls back to the HTTP status when the envelope omits http_code', () => {
-    expect(
-      classifyHttpFailure({
-        status: 429,
-        body: { type: 'error', error: { type: 'error', message: 'slow down' } },
-      }).category,
-    ).toBe(ProviderErrorCategory.RATE_LIMIT);
-  });
-
-  it('uses keyword heuristics for a non-explicit status when no http_code is present', () => {
-    expect(
-      classifyHttpFailure({
-        // 403 is not one of the explicitly classified codes, so the message
-        // keyword drives the category.
-        status: 403,
-        body: { error: { message: 'Insufficient credit balance.' } },
-      }).category,
-    ).toBe(ProviderErrorCategory.INSUFFICIENT_BALANCE);
+      baseRespFailure({ base_resp: { status_code: 1004, status_msg: 'bad key' } }),
+    ).toEqual({ category: ProviderErrorCategory.AUTH, message: 'bad key' });
+    // Uses a generated message when status_msg is absent.
+    expect(baseRespFailure({ base_resp: { status_code: 9999 } })?.message).toMatch(
+      /9999/,
+    );
+    // status_code 0 / absent is not a failure.
+    expect(baseRespFailure({ base_resp: { status_code: 0 } })).toBeUndefined();
+    expect(baseRespFailure({})).toBeUndefined();
   });
 });
 
-describe('query response extractors (nested task envelope)', () => {
-  it('extracts the result url from task.content.url on success', () => {
-    expect(
-      extractResultUrl({
-        task: { status: 'succeeded', content: { url: 'https://x/v.mp4' } },
-      }),
-    ).toBe('https://x/v.mp4');
-  });
-
-  it('returns undefined when there is no result url', () => {
-    expect(extractResultUrl({ task: { status: 'running' } })).toBeUndefined();
-    expect(extractResultUrl({})).toBeUndefined();
-  });
-
-  it('extracts provider failure details from task.error', () => {
-    expect(
-      extractTaskFailure({
-        task: { status: 'failed', error: { message: 'flagged', code: 'SAFETY' } },
-      }),
-    ).toEqual({ message: 'flagged', code: 'SAFETY' });
-    expect(extractTaskFailure({ task: { status: 'succeeded' } })).toBeUndefined();
-  });
-
-  it('extracts the task id from create/query responses', () => {
+describe('flat response extractors', () => {
+  it('extracts task_id', () => {
     expect(extractTaskId({ task_id: 'abc' })).toBe('abc');
-    expect(extractTaskId({ task: { task_id: 'def' } })).toBe('def');
     expect(extractTaskId({})).toBeUndefined();
   });
-});
 
-describe('classifyTaskFailureCategory (async task.error taxonomy)', () => {
-  it('classifies moderation MESSAGE keywords as content_moderation', () => {
-    expect(
-      classifyTaskFailureCategory({ message: 'flagged by moderation' }),
-    ).toBe(ProviderErrorCategory.CONTENT_MODERATION);
-    expect(
-      classifyTaskFailureCategory({ message: 'blocked by safety review' }),
-    ).toBe(ProviderErrorCategory.CONTENT_MODERATION);
+  it('extracts file_id (string or numeric)', () => {
+    expect(extractFileId({ file_id: '205258526306433' })).toBe('205258526306433');
+    expect(extractFileId({ file_id: 12345 })).toBe('12345');
+    expect(extractFileId({})).toBeUndefined();
   });
 
-  it('matches EXACT numeric codes only (no substring search across messages)', () => {
+  it('extracts file.download_url from a retrieve response', () => {
     expect(
-      classifyTaskFailureCategory({ message: 'x', code: 400 }),
-    ).toBe(ProviderErrorCategory.INVALID_REQUEST);
-    expect(classifyTaskFailureCategory({ message: 'x', code: 401 })).toBe(
-      ProviderErrorCategory.AUTH,
-    );
-    expect(classifyTaskFailureCategory({ message: 'x', code: 402 })).toBe(
-      ProviderErrorCategory.INSUFFICIENT_BALANCE,
-    );
-    expect(classifyTaskFailureCategory({ message: 'x', code: 422 })).toBe(
-      ProviderErrorCategory.CONTENT_MODERATION,
-    );
-    expect(classifyTaskFailureCategory({ message: 'x', code: 429 })).toBe(
-      ProviderErrorCategory.RATE_LIMIT,
-    );
-    // Numeric codes may also arrive as strings.
-    expect(classifyTaskFailureCategory({ message: 'x', code: '429' })).toBe(
-      ProviderErrorCategory.RATE_LIMIT,
-    );
-  });
-
-  it('does not let numeric substrings in code or message drive classification', () => {
-    // code 1027 with a message containing "1422" is NOT moderation.
-    expect(
-      classifyTaskFailureCategory({
-        message: 'request 1422 timed out',
-        code: 1027,
-      }),
-    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
-    // a message mentioning "4290ms" is NOT rate limiting.
-    expect(
-      classifyTaskFailureCategory({ message: 'request took 4290ms', code: 'TIMEOUT' }),
-    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
-    // a numeric-looking string code that is not exactly a known code is not classified.
-    expect(classifyTaskFailureCategory({ message: 'x', code: '4290' })).toBe(
-      ProviderErrorCategory.PROVIDER_FAILURE,
-    );
-  });
-
-  it('classifies balance signals as insufficient_balance', () => {
-    expect(
-      classifyTaskFailureCategory({ message: 'no credits left', code: 'INSUFFICIENT_BALANCE' }),
-    ).toBe(ProviderErrorCategory.INSUFFICIENT_BALANCE);
-    expect(classifyTaskFailureCategory({ message: 'insufficient balance' })).toBe(
-      ProviderErrorCategory.INSUFFICIENT_BALANCE,
-    );
-  });
-
-  it('classifies rate-limit signals as rate_limit', () => {
-    expect(
-      classifyTaskFailureCategory({ message: 'too many requests', code: 429 }),
-    ).toBe(ProviderErrorCategory.RATE_LIMIT);
-  });
-
-  it('falls back to provider_failure for generic/unknown errors', () => {
-    expect(classifyTaskFailureCategory({ message: 'something went wrong' })).toBe(
-      ProviderErrorCategory.PROVIDER_FAILURE,
-    );
-    expect(
-      classifyTaskFailureCategory({ message: 'oops', code: 'INTERNAL_X' }),
-    ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
+      extractDownloadUrl({ file: { download_url: 'https://x/v.mp4' } }),
+    ).toBe('https://x/v.mp4');
+    expect(extractDownloadUrl({})).toBeUndefined();
+    expect(extractDownloadUrl({ file: {} })).toBeUndefined();
   });
 });
 
 describe('mapQueryResult', () => {
-  it('maps a succeeded task with a result url', () => {
+  it('maps Success by retrieving file_id -> file.download_url', async () => {
+    const retrieve = (fileId: string) => {
+      expect(fileId).toBe('file-1');
+      return {
+        file: { download_url: 'https://x/v.mp4' },
+        base_resp: { status_code: 0, status_msg: 'success' },
+      };
+    };
     expect(
-      mapQueryResult({
-        task: { status: 'succeeded', content: { url: 'https://x/v.mp4' } },
-      }),
+      await mapQueryResult(
+        {
+          task_id: 't1',
+          status: 'Success',
+          file_id: 'file-1',
+          base_resp: { status_code: 0, status_msg: 'success' },
+        },
+        retrieve,
+      ),
     ).toEqual({ status: 'succeeded', resultUrl: 'https://x/v.mp4' });
   });
 
-  it('maps a running task with no url and no failure', () => {
-    expect(mapQueryResult({ task: { status: 'running' } })).toEqual({
-      status: 'running',
-    });
+  it('maps Preparing/Queueing to queued and Processing to running', async () => {
+    expect((await mapQueryResult({ status: 'Preparing' })).status).toBe('queued');
+    expect((await mapQueryResult({ status: 'Queueing' })).status).toBe('queued');
+    expect((await mapQueryResult({ status: 'Processing' })).status).toBe('running');
   });
 
-  it('converts succeeded WITHOUT a usable url into a recoverable failed failure', () => {
-    const out = mapQueryResult({ task: { status: 'succeeded' } });
-    expect(out.status).toBe('failed'); // not succeeded → still retryable
-    expect(out.failure?.category).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
-    expect(out.failure?.message).toMatch(/no usable result URL/i);
-    // No resultUrl leaked onto a failed-convert.
-    expect(out.resultUrl).toBeUndefined();
-  });
-
-  it('converts succeeded with an empty content url into a recoverable failed failure', () => {
-    const out = mapQueryResult({
-      task: { status: 'succeeded', content: { url: '' } },
-    });
+  it('maps Fail to a provider_failure', async () => {
+    const out = await mapQueryResult({ status: 'Fail' });
     expect(out.status).toBe('failed');
     expect(out.failure?.category).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
   });
 
-  it('classifies a failed task.error by message keyword instead of always provider_failure', () => {
-    const out = mapQueryResult({
-      task: { status: 'failed', error: { message: 'blocked by safety review', code: 'SAFETY_RISK' } },
+  it('treats a nonzero base_resp as a typed failure', async () => {
+    const out = await mapQueryResult({
+      status: 'Processing',
+      base_resp: { status_code: 1004, status_msg: 'auth' },
     });
     expect(out.status).toBe('failed');
-    expect(out.failure?.category).toBe(ProviderErrorCategory.CONTENT_MODERATION);
-    expect(out.failure?.message).toBe('blocked by safety review');
+    expect(out.failure?.category).toBe(ProviderErrorCategory.AUTH);
   });
 
-  it('maps a balance task.error to insufficient_balance', () => {
-    expect(
+  it('keeps Success WITHOUT a file_id retryable (throws a transient ProviderError)', async () => {
+    await expect(
       mapQueryResult({
-        task: { status: 'failed', error: { message: 'insufficient balance', code: 402 } },
-      }).failure?.category,
-    ).toBe(ProviderErrorCategory.INSUFFICIENT_BALANCE);
+        status: 'Success',
+        base_resp: { status_code: 0, status_msg: 'success' },
+      }),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.PROVIDER_FAILURE });
   });
 
-  it('maps a rate-limit task.error to rate_limit', () => {
-    expect(
+  it('keeps a retryable retrieve base_resp error retryable (throws rate_limit)', async () => {
+    await expect(
+      mapQueryResult(
+        {
+          status: 'Success',
+          file_id: 'f1',
+          base_resp: { status_code: 0, status_msg: 'success' },
+        },
+        () => ({ base_resp: { status_code: 1002, status_msg: 'rate limited' } }),
+      ),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.RATE_LIMIT });
+  });
+
+  it('keeps Success whose retrieve yields no download_url retryable (throws)', async () => {
+    await expect(
+      mapQueryResult(
+        {
+          status: 'Success',
+          file_id: 'f1',
+          base_resp: { status_code: 0, status_msg: 'success' },
+        },
+        () => ({ file: {}, base_resp: { status_code: 0 } }),
+      ),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.PROVIDER_FAILURE });
+  });
+
+  // P1 regressions: a transient READ-PATH failure must never terminal-fail an
+  // already-paid job. Retryable categories (rate_limit / provider_failure) on the
+  // query or retrieve read path THROW a typed ProviderError so the poller keeps
+  // the row queued/running and counts it against its bounded budget. A definitive
+  // category (auth / moderation / balance / invalid request) on the read path is a
+  // genuine terminal failure; a genuine provider task `Fail` is always terminal.
+  it('keeps a rate_limit query base_resp retryable (throws rate_limit)', async () => {
+    await expect(
       mapQueryResult({
-        task: { status: 'failed', error: { message: 'rate limited', code: 429 } },
-      }).failure?.category,
+        status: 'Processing',
+        base_resp: { status_code: 1002, status_msg: 'rate limited' },
+      }),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.RATE_LIMIT });
+  });
+
+  it('keeps an unrecognized (provider_failure) query base_resp retryable (throws)', async () => {
+    await expect(
+      mapQueryResult({
+        status: 'Processing',
+        base_resp: { status_code: 9999, status_msg: 'boom' },
+      }),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.PROVIDER_FAILURE });
+  });
+
+  it('treats a DEFINITIVE (auth) retrieve base_resp as a genuine terminal failure', async () => {
+    const out = await mapQueryResult(
+      {
+        status: 'Success',
+        file_id: 'f1',
+        base_resp: { status_code: 0, status_msg: 'success' },
+      },
+      () => ({ base_resp: { status_code: 1004, status_msg: 'bad key' } }),
+    );
+    expect(out.status).toBe('failed');
+    expect(out.failure?.category).toBe(ProviderErrorCategory.AUTH);
+  });
+});
+
+describe('classifyHttpFailure', () => {
+  it('prefers a nonzero base_resp over the HTTP status', () => {
+    expect(
+      classifyHttpFailure({
+        status: 500,
+        body: { base_resp: { status_code: 1004, status_msg: 'auth' } },
+      }).category,
+    ).toBe(ProviderErrorCategory.AUTH);
+  });
+
+  it('falls back to HTTP status semantics when base_resp is absent', () => {
+    expect(
+      classifyHttpFailure({ status: 401, body: {} }).category,
+    ).toBe(ProviderErrorCategory.AUTH);
+    expect(
+      classifyHttpFailure({ status: 429, body: {} }).category,
     ).toBe(ProviderErrorCategory.RATE_LIMIT);
-  });
-
-  it('maps a generic failed task.error to provider_failure', () => {
     expect(
-      mapQueryResult({
-        task: { status: 'failed', error: { message: 'internal error', code: 'X' } },
-      }).failure?.category,
+      classifyHttpFailure({ status: 400, body: {} }).category,
+    ).toBe(ProviderErrorCategory.INVALID_REQUEST);
+    expect(
+      classifyHttpFailure({ status: 503, body: {} }).category,
     ).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
   });
 
-  it('maps cancelled to a terminal failed status with no failure', () => {
-    expect(mapQueryResult({ task: { status: 'cancelled' } })).toEqual({
-      status: 'failed',
-    });
+  it('uses message-keyword heuristics for variants without base_resp', () => {
+    expect(
+      classifyHttpFailure({
+        status: 403,
+        body: { message: 'Insufficient credit balance.' },
+      }).category,
+    ).toBe(ProviderErrorCategory.INSUFFICIENT_BALANCE);
   });
 });

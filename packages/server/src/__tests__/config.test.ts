@@ -15,7 +15,7 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     dbPath: ':memory:',
     providerMode: 'mock',
     minimaxApiKey: null,
-    minimaxBaseUrl: 'https://api.minimaxi.com',
+    minimaxBaseUrl: 'https://api.minimax.io',
     minimaxGroupId: null,
     pollIntervalMs: 1000,
     pollMaxAttempts: 5,
@@ -28,10 +28,10 @@ function baseConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 
 describe('normalizeBaseUrl', () => {
   it('strips one or more trailing slashes and trims whitespace', () => {
-    expect(normalizeBaseUrl('https://api.minimaxi.com/')).toBe('https://api.minimaxi.com');
-    expect(normalizeBaseUrl('https://api.minimaxi.com///')).toBe('https://api.minimaxi.com');
-    expect(normalizeBaseUrl('  https://api.minimaxi.com/  ')).toBe('https://api.minimaxi.com');
-    expect(normalizeBaseUrl('https://api.minimaxi.com')).toBe('https://api.minimaxi.com');
+    expect(normalizeBaseUrl('https://api.minimax.io/')).toBe('https://api.minimax.io');
+    expect(normalizeBaseUrl('https://api.minimax.io///')).toBe('https://api.minimax.io');
+    expect(normalizeBaseUrl('  https://api.minimax.io/  ')).toBe('https://api.minimax.io');
+    expect(normalizeBaseUrl('https://api.minimax.io')).toBe('https://api.minimax.io');
   });
 });
 
@@ -39,9 +39,9 @@ describe('loadConfig base url', () => {
   it('normalizes a trailing slash on MINIMAX_BASE_URL', () => {
     const config = loadConfig({
       PROVIDER_MODE: 'mock',
-      MINIMAX_BASE_URL: 'https://api.minimaxi.com/',
+      MINIMAX_BASE_URL: 'https://api.minimax.io/',
     });
-    expect(config.minimaxBaseUrl).toBe('https://api.minimaxi.com');
+    expect(config.minimaxBaseUrl).toBe('https://api.minimax.io');
   });
 });
 

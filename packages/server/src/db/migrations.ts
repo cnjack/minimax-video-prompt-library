@@ -79,6 +79,74 @@ export const MIGRATIONS: Migration[] = [
       CREATE INDEX IF NOT EXISTS idx_jobs_created ON generation_jobs(created_at);
     `,
   },
+  {
+    version: 2,
+    name: 'add_tracking_exhausted_status',
+    sql: `
+      -- Add the recoverable 'tracking_exhausted' status to generation_jobs.
+      --
+      -- When the poller's bounded transient-failure budget is exhausted on an
+      -- ALREADY-PAID job, the job is persisted as 'tracking_exhausted' (not
+      -- 'failed') so the only recovery is a Resume that re-polls the SAME stored
+      -- provider task id (no paid provider create). SQLite cannot ALTER a CHECK
+      -- constraint in place, so the table is rebuilt with the expanded constraint.
+      --
+      -- FK-safe: no other table references generation_jobs, so the rebuild copies
+      -- all rows into a new table, drops the old one, and recreates the indexes.
+      CREATE TABLE generation_jobs__v2 (
+        id                       TEXT PRIMARY KEY,
+        prompt_id                TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+        prompt_version_id        TEXT NOT NULL REFERENCES prompt_versions(id),
+        rendered_prompt          TEXT NOT NULL,
+        model                    TEXT NOT NULL,
+        duration_seconds         INTEGER NOT NULL,
+        aspect_ratio             TEXT NOT NULL,
+        resolution               TEXT NOT NULL,
+        first_frame_url          TEXT,
+        last_frame_url           TEXT,
+        reference_image_url      TEXT,
+        reference_video_url      TEXT,
+        reference_audio_url      TEXT,
+        status                   TEXT NOT NULL DEFAULT 'queued'
+                                   CHECK (status IN
+                                     ('queued','running','succeeded','failed',
+                                      'expired','tracking_exhausted')),
+        provider                 TEXT NOT NULL,
+        provider_task_id         TEXT,
+        result_url               TEXT,
+        error_code               TEXT,
+        error_message            TEXT,
+        idempotency_key          TEXT NOT NULL UNIQUE,
+        idempotency_payload_hash TEXT NOT NULL,
+        parameters               TEXT NOT NULL DEFAULT '{}',
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL,
+        completed_at             TEXT
+      );
+
+      INSERT INTO generation_jobs__v2
+        (id, prompt_id, prompt_version_id, rendered_prompt, model,
+         duration_seconds, aspect_ratio, resolution, first_frame_url,
+         last_frame_url, reference_image_url, reference_video_url,
+         reference_audio_url, status, provider, provider_task_id, result_url,
+         error_code, error_message, idempotency_key, idempotency_payload_hash,
+         parameters, created_at, updated_at, completed_at)
+      SELECT id, prompt_id, prompt_version_id, rendered_prompt, model,
+         duration_seconds, aspect_ratio, resolution, first_frame_url,
+         last_frame_url, reference_image_url, reference_video_url,
+         reference_audio_url, status, provider, provider_task_id, result_url,
+         error_code, error_message, idempotency_key, idempotency_payload_hash,
+         parameters, created_at, updated_at, completed_at
+      FROM generation_jobs;
+
+      DROP TABLE generation_jobs;
+      ALTER TABLE generation_jobs__v2 RENAME TO generation_jobs;
+
+      CREATE INDEX IF NOT EXISTS idx_jobs_status ON generation_jobs(status);
+      CREATE INDEX IF NOT EXISTS idx_jobs_prompt ON generation_jobs(prompt_id);
+      CREATE INDEX IF NOT EXISTS idx_jobs_created ON generation_jobs(created_at);
+    `,
+  },
 ];
 
 export class MigrationError extends Error {

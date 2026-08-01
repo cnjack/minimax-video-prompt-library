@@ -106,6 +106,11 @@ export interface CreateJobInput {
 }
 
 const TERMINAL_STATUSES = ['succeeded', 'failed', 'expired'];
+// Recoverable-stalled: not polled, but resumable with no paid provider create.
+const STALL_STATUSES = ['tracking_exhausted'];
+// Everything that is NOT polled: genuine terminal + recoverable-stalled. The
+// poller advances only queued/running rows.
+const NON_POLLABLE_STATUSES = [...TERMINAL_STATUSES, ...STALL_STATUSES];
 
 export class JobRepository {
   constructor(private readonly db: DB) {}
@@ -194,30 +199,38 @@ export class JobRepository {
     return rows.map(mapRow);
   }
 
-  /** Non-terminal jobs the poller should advance. */
+  /**
+   * Jobs the poller should advance: only `queued`/`running`. Genuine terminal
+   * statuses AND the recoverable-stalled `tracking_exhausted` are excluded (a
+   * stalled job is not polled until it is explicitly resumed).
+   */
   listNonTerminal(): GenerationJob[] {
-    const placeholders = TERMINAL_STATUSES.map(() => '?').join(', ');
+    const placeholders = NON_POLLABLE_STATUSES.map(() => '?').join(', ');
     const rows = this.db
       .prepare(
         `SELECT * FROM generation_jobs WHERE status NOT IN (${placeholders}) ORDER BY created_at ASC`,
       )
-      .all(...TERMINAL_STATUSES) as unknown as JobRow[];
+      .all(...NON_POLLABLE_STATUSES) as unknown as JobRow[];
     return rows.map(mapRow);
   }
 
   /**
    * Apply a status/field update with a compare-and-set guard.
    *
-   * A NON-TERMINAL target status (queued/running) is only written when the row is
-   * itself non-terminal, so a stale poll (or any non-terminal write) can never
-   * revive an already-terminal (succeeded/failed/expired) row back to
-   * queued/running. Terminal target statuses are always applied (re-asserting a
-   * terminal state is idempotent).
+   * A NON-TERMINAL target status (queued/running/tracking_exhausted) is only
+   * written when the row is itself pollable (queued/running), so a stale poll —
+   * or any non-terminal write — can never revive an already-terminal
+   * (succeeded/failed/expired) row OR a recoverable-stalled
+   * (tracking_exhausted) row back to queued/running. (A stalled row is revived
+   * only by the dedicated {@link JobRepository.resumeTracking} path.) Terminal
+   * target statuses are always applied (re-asserting a terminal state is
+   * idempotent).
    *
    * Returns the resulting row plus a `lostUpdate` flag that is true when a
-   * non-terminal update was refused because the row was already terminal (the
-   * returned `job` is then the unchanged terminal row). Callers (the poller) must
-   * treat `lostUpdate` as a safe no-op rather than overwriting state.
+   * non-terminal update was refused because the row was already non-pollable
+   * (terminal or stalled); the returned `job` is then the unchanged row.
+   * Callers (the poller) must treat `lostUpdate` as a safe no-op rather than
+   * overwriting state.
    */
   updateStatus(id: string, update: JobStatusUpdate): UpdateStatusOutcome {
     const setClauses: string[] = ['updated_at = ?'];
@@ -249,27 +262,60 @@ export class JobRepository {
       setParams.push(update.now);
     }
 
-    // Compare-and-set guard: a non-terminal target only applies to a row that is
-    // currently non-terminal. This prevents a stale non-terminal update from
-    // moving an already-terminal row back to queued/running.
+    // Compare-and-set guard: a non-terminal target (queued/running, or a
+    // tracking_exhausted stall from the poller) only applies to a row that is
+    // currently pollable (queued/running). This prevents a stale non-terminal
+    // update from moving an already-terminal OR already-stalled row back to
+    // queued/running. (Resuming a stalled row uses resumeTracking, not here.)
     const targetIsNonTerminal =
       update.status !== undefined && !TERMINAL_STATUSES.includes(update.status);
     const guardClause = targetIsNonTerminal
-      ? ` AND status NOT IN (${TERMINAL_STATUSES.map(() => '?').join(', ')})`
+      ? ` AND status NOT IN (${NON_POLLABLE_STATUSES.map(() => '?').join(', ')})`
       : '';
-    const guardParams: SqlBind = targetIsNonTerminal ? [...TERMINAL_STATUSES] : [];
+    const guardParams: SqlBind = targetIsNonTerminal
+      ? [...NON_POLLABLE_STATUSES]
+      : [];
 
     const info = this.db
       .prepare(
         `UPDATE generation_jobs SET ${setClauses.join(', ')} WHERE id = ?${guardClause}`,
       )
       // Placeholder order matches the SQL: SET params, then the row id, then the
-      // CAS guard params (terminal statuses).
+      // CAS guard params (non-pollable statuses).
       .run(...setParams, id, ...guardParams) as { changes?: number };
 
     const row = this.getById(id);
     const lostUpdate = targetIsNonTerminal && (info.changes ?? 1) === 0;
     return { job: row, lostUpdate };
+  }
+
+  /**
+   * Compare-and-set RESUME of a tracking-exhausted job back to a polled state.
+   *
+   * The ONLY sanctioned way to move a `tracking_exhausted` row back to polling.
+   * It performs NO provider create — the SAME stored `provider_task_id` is
+   * re-polled on the next tick. Allowed exclusively when the row is exactly
+   * `tracking_exhausted` AND has a nonempty `provider_task_id`; a
+   * succeeded/failed/expired row is never revived (changes=0). Idempotent and
+   * concurrency-safe: a second resume (once the row is already `running`)
+   * matches no row (changes=0). Clears the stale tracking-exhausted error
+   * metadata so a resumed job does not display a stale error.
+   */
+  resumeTracking(id: string, now: string): { job: GenerationJob | null; resumed: boolean } {
+    const info = this.db
+      .prepare(
+        `UPDATE generation_jobs
+           SET status = 'running',
+               error_code = NULL,
+               error_message = NULL,
+               updated_at = ?
+         WHERE id = ?
+           AND status = 'tracking_exhausted'
+           AND provider_task_id IS NOT NULL
+           AND provider_task_id <> ''`,
+      )
+      .run(now, id) as { changes?: number };
+    return { job: this.getById(id), resumed: (info.changes ?? 0) > 0 };
   }
 
   /** Reset transient-failure attempt counters (stored on the job row params). */

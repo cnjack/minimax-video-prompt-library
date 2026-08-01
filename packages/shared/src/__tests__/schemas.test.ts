@@ -1,87 +1,73 @@
 import { describe, expect, it } from 'vitest';
-import {
-  createGenerationSchema,
-  createPromptSchema,
-} from '../schemas.js';
-import { H3_CONCRETE_RATIOS } from '../h3-policy.js';
+import { createGenerationSchema, createPromptSchema } from '../schemas.js';
+import { MINIMAX_MAX_PROMPT_CHARS } from '../video-policy.js';
 
 describe('createGenerationSchema validation', () => {
   const base = {
     promptVersionId: 'v1',
     values: {},
     durationSeconds: 6,
-    aspectRatio: '16:9',
-    resolution: '2K',
+    resolution: '768P',
   };
 
   it('accepts a minimal valid request', () => {
     expect(() => createGenerationSchema.parse(base)).not.toThrow();
   });
 
-  it('accepts duration boundaries 4 and 15', () => {
+  it('accepts both supported durations', () => {
+    expect(() =>
+      createGenerationSchema.parse({ ...base, durationSeconds: 6 }),
+    ).not.toThrow();
+    expect(() =>
+      createGenerationSchema.parse({
+        ...base,
+        durationSeconds: 10,
+        resolution: '768P',
+      }),
+    ).not.toThrow();
+  });
+
+  it('rejects durations outside the supported set (no arbitrary 4–15s)', () => {
     expect(() =>
       createGenerationSchema.parse({ ...base, durationSeconds: 4 }),
-    ).not.toThrow();
+    ).toThrow();
+    expect(() =>
+      createGenerationSchema.parse({ ...base, durationSeconds: 5 }),
+    ).toThrow();
     expect(() =>
       createGenerationSchema.parse({ ...base, durationSeconds: 15 }),
+    ).toThrow();
+  });
+
+  it.each(['768P', '1080P'] as const)('accepts resolution %s', (resolution) => {
+    expect(() =>
+      createGenerationSchema.parse({ ...base, resolution }),
     ).not.toThrow();
   });
 
-  it('rejects out-of-range durations', () => {
+  it('rejects an unsupported resolution (no legacy 2K)', () => {
     expect(() =>
-      createGenerationSchema.parse({ ...base, durationSeconds: 3 }),
+      createGenerationSchema.parse({ ...base, resolution: '2K' }),
     ).toThrow();
-    expect(() =>
-      createGenerationSchema.parse({ ...base, durationSeconds: 16 }),
-    ).toThrow();
-  });
-
-  it.each(H3_CONCRETE_RATIOS)('accepts concrete aspect ratio %s', (ratio) => {
-    expect(() =>
-      createGenerationSchema.parse({ ...base, aspectRatio: ratio }),
-    ).not.toThrow();
-  });
-
-  it('rejects an unsupported aspect ratio', () => {
-    expect(() =>
-      createGenerationSchema.parse({ ...base, aspectRatio: '2.35:1' }),
-    ).toThrow();
-  });
-
-  it('rejects an unsupported resolution', () => {
     expect(() =>
       createGenerationSchema.parse({ ...base, resolution: '4K' }),
     ).toThrow();
   });
 
-  it('accepts http(s) reference URLs', () => {
+  it('accepts an http(s) first-frame image URL', () => {
     expect(() =>
       createGenerationSchema.parse({
         ...base,
         firstFrameUrl: 'https://example.com/a.png',
-        referenceVideoUrl: 'http://example.com/b.mp4',
-      }),
-    ).toThrow(); // mixing frame + reference is invalid
-    expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        referenceImageUrl: 'https://example.com/c.png',
-        referenceVideoUrl: 'http://example.com/b.mp4',
       }),
     ).not.toThrow();
   });
 
-  it('rejects non-http(s) URLs', () => {
+  it('rejects a non-http(s) first-frame URL', () => {
     expect(() =>
       createGenerationSchema.parse({
         ...base,
         firstFrameUrl: 'file:///etc/passwd',
-      }),
-    ).toThrow();
-    expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        referenceImageUrl: 'ftp://example.com/x.png',
       }),
     ).toThrow();
   });
@@ -89,110 +75,86 @@ describe('createGenerationSchema validation', () => {
   it('requires a prompt version id', () => {
     expect(() => createGenerationSchema.parse({ ...base, promptVersionId: '' })).toThrow();
   });
+});
 
-  it('accepts an optional rendered-prompt override and caps it at the H3 limit', () => {
+describe('createGenerationSchema: 10s only at 768P', () => {
+  const base = {
+    promptVersionId: 'v1',
+    values: {},
+    durationSeconds: 10,
+    resolution: '768P' as const,
+  };
+
+  it('accepts 10s at 768P', () => {
+    expect(() => createGenerationSchema.parse(base)).not.toThrow();
+  });
+
+  it('rejects 10s at 1080P with a validation error', () => {
     expect(() =>
-      createGenerationSchema.parse({ ...base, prompt: 'a car, pan left' }),
-    ).not.toThrow();
-    const at = createGenerationSchema.parse({ ...base, prompt: 'x'.repeat(7000) });
-    expect(at.prompt).toHaveLength(7000);
-    expect(() =>
-      createGenerationSchema.parse({ ...base, prompt: 'x'.repeat(7001) }),
+      createGenerationSchema.parse({ ...base, resolution: '1080P' }),
     ).toThrow();
-    // Blank trims to empty (treated as "no override" by the service).
-    expect(createGenerationSchema.parse({ ...base, prompt: '   ' }).prompt).toBe('');
   });
 });
 
-describe('createGenerationSchema cross-field + ratio rules (negative)', () => {
+describe('createGenerationSchema: unsupported options are visibly disabled', () => {
   const base = {
     promptVersionId: 'v1',
     values: {},
     durationSeconds: 6,
-    aspectRatio: '16:9' as const,
-    resolution: '2K' as const,
+    resolution: '768P' as const,
   };
 
-  it('rejects adaptive ratio for text-to-video', () => {
+  it.each([
+    ['aspectRatio', '16:9'],
+    ['lastFrameUrl', 'https://example.com/b.png'],
+    ['referenceImageUrl', 'https://example.com/c.png'],
+    ['referenceVideoUrl', 'https://example.com/d.mp4'],
+    ['referenceAudioUrl', 'https://example.com/e.mp3'],
+  ] as const)('rejects a supplied %s', (field, value) => {
     expect(() =>
-      createGenerationSchema.parse({ ...base, aspectRatio: 'adaptive' }),
+      createGenerationSchema.parse({ ...base, [field]: value }),
     ).toThrow();
   });
 
-  it('rejects a last frame without a first frame', () => {
+  it('does not reject an empty/absent unsupported field', () => {
     expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        aspectRatio: 'adaptive',
-        lastFrameUrl: 'https://example.com/b.png',
-      }),
-    ).toThrow();
-  });
-
-  it('rejects mixing first/last-frame with reference media', () => {
-    expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        aspectRatio: 'adaptive',
-        firstFrameUrl: 'https://example.com/a.png',
-        referenceImageUrl: 'https://example.com/c.png',
-      }),
-    ).toThrow();
-  });
-
-  it('rejects reference audio used alone', () => {
-    expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        referenceAudioUrl: 'https://example.com/a.mp3',
-      }),
-    ).toThrow();
-  });
-
-  it('accepts adaptive ratio for first-frame mode', () => {
-    expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        aspectRatio: 'adaptive',
-        firstFrameUrl: 'https://example.com/a.png',
-      }),
+      createGenerationSchema.parse({ ...base, aspectRatio: '' }),
     ).not.toThrow();
   });
+});
 
-  it('rejects a concrete ratio for first/last-frame mode (requires adaptive)', () => {
+describe('createGenerationSchema prompt override limit', () => {
+  const base = {
+    promptVersionId: 'v1',
+    values: {},
+    durationSeconds: 6,
+    resolution: '768P' as const,
+  };
+
+  it('accepts an optional rendered-prompt override and caps it at the limit', () => {
+    expect(() =>
+      createGenerationSchema.parse({ ...base, prompt: 'a car, pan left' }),
+    ).not.toThrow();
+    const at = createGenerationSchema.parse({
+      ...base,
+      prompt: 'x'.repeat(MINIMAX_MAX_PROMPT_CHARS),
+    });
+    expect(at.prompt).toHaveLength(MINIMAX_MAX_PROMPT_CHARS);
+  });
+
+  it('rejects a prompt over the 2000-character limit', () => {
     expect(() =>
       createGenerationSchema.parse({
         ...base,
-        aspectRatio: '16:9',
-        firstFrameUrl: 'https://example.com/a.png',
-      }),
-    ).toThrow();
-    // First + last frame together also requires adaptive.
-    expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        aspectRatio: '16:9',
-        firstFrameUrl: 'https://example.com/a.png',
-        lastFrameUrl: 'https://example.com/b.png',
+        prompt: 'x'.repeat(MINIMAX_MAX_PROMPT_CHARS + 1),
       }),
     ).toThrow();
   });
 
-  it('accepts adaptive or concrete ratio for reference mode', () => {
-    expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        aspectRatio: 'adaptive',
-        referenceImageUrl: 'https://example.com/c.png',
-      }),
-    ).not.toThrow();
-    expect(() =>
-      createGenerationSchema.parse({
-        ...base,
-        aspectRatio: '16:9',
-        referenceImageUrl: 'https://example.com/c.png',
-      }),
-    ).not.toThrow();
+  it('blank-trims the override to empty (treated as absent by the service)', () => {
+    expect(createGenerationSchema.parse({ ...base, prompt: '   ' }).prompt).toBe(
+      '',
+    );
   });
 });
 

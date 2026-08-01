@@ -1,7 +1,7 @@
 # Local development / dogfood via Docker Compose.
 #
 # Defaults to deterministic MOCK mode (no MiniMax key required). To run against
-# the real MiniMax H3 API, set PROVIDER_MODE=minimax and provide MINIMAX_API_KEY
+# the real MiniMax Hailuo API, set PROVIDER_MODE=minimax and provide MINIMAX_API_KEY
 # (preferably via a secrets manager / .env that is never committed).
 services:
   h3-studio:

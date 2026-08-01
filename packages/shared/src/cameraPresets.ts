@@ -1,7 +1,7 @@
 /**
  * Camera-movement preset chips — a small, pure, dependency-free module.
  *
- * MiniMax's official H3 guide recommends camera-motion cues (pan, push/pull,
+ * MiniMax's official Hailuo guide recommends camera-motion cues (pan, push/pull,
  * tracking, static, …). Rather than ask creators to remember or retype the
  * supported phrasing, the generation composer offers one-click "chips" that
  * insert a preset token at the current prompt cursor.
@@ -9,10 +9,10 @@
  * The data (labels + inserted tokens) and the insertion logic live here so they
  * are testable in isolation and are not duplicated across UI surfaces. The
  * inserted token is ordinary prompt text; once inserted it is validated through
- * the same H3 request policy (character limit etc.) as any other prompt.
+ * the same MiniMax request policy (character limit etc.) as any other prompt.
  *
  * Source: MiniMax platform guides
- * `guides/video-generation` (camera-motion cues for model `MiniMax-H3`).
+ * `guides/video-generation` (camera-motion cues for model `MiniMax-Hailuo-2.3`).
  */
 
 /** A single camera-movement preset surfaced as a chip in the composer. */

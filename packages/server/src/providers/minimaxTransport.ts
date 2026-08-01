@@ -42,7 +42,7 @@ export class MinimaxTransport {
 
   constructor(private readonly options: MinimaxTransportOptions) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
-    // Normalize a trailing slash so we never produce `//v2/...`. Done in
+    // Normalize a trailing slash so we never produce `//v1/...`. Done in
     // config too; repeated defensively here so the transport is safe in tests.
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.timeoutMs = options.timeoutMs ?? 30_000;

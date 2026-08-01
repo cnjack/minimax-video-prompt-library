@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "H3 Prompt Studio — versioned MiniMax H3 prompt library and generation workspace.",
+  "description": "H3 Prompt Studio — versioned MiniMax Hailuo prompt library and generation workspace.",
   "packageManager": "pnpm@10.10.0",
   "engines": {
     "node": ">=22"
