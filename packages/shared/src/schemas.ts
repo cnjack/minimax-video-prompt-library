@@ -161,7 +161,14 @@ export const MAX_RENDERED_PROMPT_CHARS = MINIMAX_MAX_PROMPT_CHARS;
 
 export const listJobsQuerySchema = z.object({
   status: z
-    .enum(['queued', 'running', 'succeeded', 'failed', 'expired'])
+    .enum([
+      'queued',
+      'running',
+      'succeeded',
+      'failed',
+      'expired',
+      'tracking_exhausted',
+    ])
     .optional(),
   promptId: idSchema.optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),

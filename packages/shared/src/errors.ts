@@ -58,6 +58,26 @@ export const ProviderErrorCategory = {
 export type ProviderErrorCategory =
   (typeof ProviderErrorCategory)[keyof typeof ProviderErrorCategory];
 
+/**
+ * Whether a provider error category represents a TRANSIENT read-path failure
+ * (the provider could not be read right now) as opposed to a definitive
+ * provider/account/request state.
+ *
+ * On the asynchronous read path (query / file-retrieve) of an ALREADY-PAID job,
+ * only these transient categories are allowed to keep the job retryable through
+ * the poller's bounded failure counter. A definitive category there (auth,
+ * content moderation, balance, invalid request) is a genuine terminal failure.
+ * A genuine provider task `Fail` is always terminal regardless of category.
+ */
+export function isRetryableProviderCategory(
+  category: ProviderErrorCategory,
+): boolean {
+  return (
+    category === ProviderErrorCategory.RATE_LIMIT ||
+    category === ProviderErrorCategory.PROVIDER_FAILURE
+  );
+}
+
 /** Maps a provider error category to an HTTP-facing error code. */
 export function categoryToErrorCode(
   category: ProviderErrorCategory,

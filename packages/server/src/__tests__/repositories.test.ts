@@ -247,6 +247,64 @@ describe('JobRepository.updateStatus compare-and-set guard', () => {
   });
 });
 
+describe('JobRepository tracking-exhausted + resumeTracking', () => {
+  it('listNonTerminal excludes tracking_exhausted (a stalled job is not polled)', () => {
+    const queued = baseJob();
+    const stalled = baseJob({ status: 'tracking_exhausted', providerTaskId: 'pt' });
+    const ids = jobs.listNonTerminal().map((j) => j.id);
+    expect(ids).toContain(queued.id);
+    expect(ids).not.toContain(stalled.id);
+  });
+
+  it('updateStatus refuses a non-terminal write to a tracking_exhausted row (lostUpdate)', () => {
+    // A stale poll must not silently revive a stalled row back to running — only
+    // the dedicated resumeTracking path may do that.
+    const stalled = baseJob({ status: 'tracking_exhausted', providerTaskId: 'pt' });
+    const outcome = jobs.updateStatus(stalled.id, { status: 'running', now: nowIso() });
+    expect(outcome.lostUpdate).toBe(true);
+    expect(outcome.job?.status).toBe('tracking_exhausted'); // unchanged
+  });
+
+  it('resumeTracking revives a tracking_exhausted job (with a task id) to running and clears the stale error', () => {
+    const stalled = baseJob({
+      status: 'tracking_exhausted',
+      providerTaskId: 'pt-x',
+      errorCode: 'rate_limit',
+      errorMessage: 'paused',
+    });
+    const { job, resumed } = jobs.resumeTracking(stalled.id, nowIso());
+    expect(resumed).toBe(true);
+    expect(job?.status).toBe('running');
+    expect(job?.errorCode).toBeNull(); // stale tracking error cleared
+    expect(job?.errorMessage).toBeNull();
+    expect(job?.providerTaskId).toBe('pt-x'); // SAME stored task id
+  });
+
+  it('resumeTracking is idempotent: a second resume is a safe no-op (resumed=false)', () => {
+    const stalled = baseJob({ status: 'tracking_exhausted', providerTaskId: 'pt' });
+    expect(jobs.resumeTracking(stalled.id, nowIso()).resumed).toBe(true);
+    const second = jobs.resumeTracking(stalled.id, nowIso());
+    expect(second.resumed).toBe(false); // row is now running
+    expect(second.job?.status).toBe('running');
+  });
+
+  it('resumeTracking never revives a genuine-terminal row', () => {
+    const failed = baseJob({ status: 'failed', providerTaskId: 'pt' });
+    const succeeded = baseJob({ status: 'succeeded', providerTaskId: 'pt-s', resultUrl: 'https://x/y.mp4' });
+    expect(jobs.resumeTracking(failed.id, nowIso()).resumed).toBe(false);
+    expect(jobs.resumeTracking(succeeded.id, nowIso()).resumed).toBe(false);
+    expect(jobs.getById(failed.id)?.status).toBe('failed');
+    expect(jobs.getById(succeeded.id)?.status).toBe('succeeded');
+  });
+
+  it('resumeTracking refuses a tracking_exhausted row with no stored provider task id', () => {
+    const stalled = baseJob({ status: 'tracking_exhausted', providerTaskId: null });
+    const { job, resumed } = jobs.resumeTracking(stalled.id, nowIso());
+    expect(resumed).toBe(false);
+    expect(job?.status).toBe('tracking_exhausted'); // cannot resume without a task id
+  });
+});
+
 describe('PromptRepository literal LIKE search', () => {
   it('treats _ and % as literals (snake_case, 100%)', () => {
     prompts.create({ id: newId(), name: 'snake_case', description: '', tags: ['snake_case'], status: 'active', now: nowIso() });

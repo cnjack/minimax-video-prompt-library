@@ -186,7 +186,13 @@ export class GenerationService {
   }
 
   /**
-   * Retry a failed/expired job as a brand-new job (history stays truthful).
+   * Regenerate a failed/expired job as a brand-new PAID job (history stays
+   * truthful). This is the "Regenerate" action.
+   *
+   * A `tracking_exhausted` job MUST NOT be regenerated: its provider task may
+   * still be alive, so the only sanctioned recovery is a Resume (re-poll the
+   * same stored task id, no paid create). Retry-as-new is therefore rejected
+   * for tracking-exhausted jobs; callers must use {@link GenerationService.resume}.
    *
    * Idempotency is driven by an explicit per-attempt idempotency token supplied
    * by the caller (the client generates one token per button click). The token is
@@ -207,10 +213,20 @@ export class GenerationService {
    */
   async retry(jobId: string, idempotencyKey: string): Promise<CreateGenerationResult> {
     const original = this.requireJob(jobId);
+    if (original.status === 'tracking_exhausted') {
+      throw new ApiError(
+        ErrorCode.UNPROCESSABLE,
+        'A tracking-exhausted job is resumable, not regeneratable: its provider ' +
+          'task may still be alive. Use the resume action to re-poll the same ' +
+          'provider task (no paid generation). Retry-as-new is disabled for ' +
+          'tracking-exhausted jobs.',
+        { status: 422 },
+      );
+    }
     if (original.status !== 'failed' && original.status !== 'expired') {
       throw new ApiError(
         ErrorCode.UNPROCESSABLE,
-        `Only failed or expired jobs can be retried (current status: ${original.status}).`,
+        `Only failed or expired jobs can be regenerated as a new job (current status: ${original.status}).`,
         { status: 422 },
       );
     }
@@ -271,6 +287,45 @@ export class GenerationService {
       request.mockScenario = p.mockScenario;
     }
     return request as CreateGenerationRequest;
+  }
+
+  /**
+   * RESUME a tracking-exhausted job: re-enable polling of its SAME stored
+   * provider task id WITHOUT a paid provider create call. This is the ONLY
+   * sanctioned recovery from `tracking_exhausted` (a stalled, already-paid job).
+   *
+   * Compare-and-set safety is delegated to the repository: only a row that is
+   * exactly `tracking_exhausted` with a nonempty `provider_task_id` is revived;
+   * succeeded/failed/expired rows are refused. The repository write is a single
+   * atomic UPDATE, so concurrent or repeated resume requests are safe — at most
+   * one performs the transition and the rest resolve to the already-running row.
+   * Never calls the provider here (no `create`); the poller re-queries the
+   * stored task id on the next tick.
+   */
+  resume(jobId: string): GenerationJob {
+    const job = this.requireJob(jobId);
+    if (job.status === 'tracking_exhausted') {
+      if (!job.providerTaskId) {
+        throw new ApiError(
+          ErrorCode.UNPROCESSABLE,
+          'Cannot resume tracking: the job has no stored provider task id.',
+          { status: 422 },
+        );
+      }
+      const { job: updated } = this.jobs.resumeTracking(jobId, nowIso());
+      return updated ?? job;
+    }
+    if (job.status === 'queued' || job.status === 'running') {
+      // Already being tracked: idempotent no-op (e.g. a duplicate/concurrent
+      // resume after another request already revived the row).
+      return job;
+    }
+    throw new ApiError(
+      ErrorCode.UNPROCESSABLE,
+      `Only tracking-exhausted jobs can resume tracking (current status: ${job.status}). ` +
+        'Use Regenerate for a failed or expired job.',
+      { status: 422 },
+    );
   }
 
   getById(id: string): GenerationJob {

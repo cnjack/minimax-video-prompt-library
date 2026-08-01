@@ -419,6 +419,122 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
   });
 });
 
+describe('resume tracking-exhausted jobs (no paid create)', () => {
+  function plantTrackingExhausted(
+    promptId: string,
+    versionId: string,
+    id: string,
+    providerTaskId: string | null = `task-${id}`,
+  ) {
+    return jobs.create({
+      id,
+      promptId,
+      promptVersionId: versionId,
+      renderedPrompt: 'x',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'tracking_exhausted',
+      provider: 'mock',
+      providerTaskId,
+      resultUrl: null,
+      errorCode: 'rate_limit',
+      errorMessage: 'Tracking paused.',
+      idempotencyKey: `src-${id}`,
+      idempotencyPayloadHash: `h-${id}`,
+      parameters: { values: {}, durationSeconds: 6, resolution: '768P', mockScenario: 'success' },
+      now: nowIso(),
+    });
+  }
+
+  it('resumes a tracking-exhausted job to running (200), reusing the SAME task and creating NO new job', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const job = plantTrackingExhausted(created.body.prompt.id, created.body.versions[0].id, 'src-te');
+    const countBefore = jobs.list({ limit: 100 }).length;
+
+    const res = await request(app).post(`/api/generations/${job.id}/resume`).expect(200);
+    expect(res.body.status).toBe('running');
+    expect(res.body.providerTaskId).toBe('task-src-te'); // SAME provider task id
+    // No new job created; the existing row was revived.
+    expect(jobs.list({ limit: 100 })).toHaveLength(countBefore);
+    expect(jobs.getById(job.id)?.status).toBe('running');
+    expect(jobs.getById(job.id)?.errorCode).toBeNull();
+  });
+
+  it('resume is idempotent: a repeated resume resolves to the running row (200)', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const job = plantTrackingExhausted(created.body.prompt.id, created.body.versions[0].id, 'src-te-idem');
+    await request(app).post(`/api/generations/${job.id}/resume`).expect(200);
+    const second = await request(app).post(`/api/generations/${job.id}/resume`).expect(200);
+    expect(second.body.status).toBe('running');
+  });
+
+  it('rejects resume for a genuine terminal (failed) job with 422', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const failed = jobs.create({
+      id: 'src-te-failed',
+      promptId: created.body.prompt.id,
+      promptVersionId: created.body.versions[0].id,
+      renderedPrompt: 'x',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'failed',
+      provider: 'mock',
+      providerTaskId: 'task-failed',
+      resultUrl: null,
+      errorCode: 'provider_failure',
+      errorMessage: 'boom',
+      idempotencyKey: 'k-te-failed',
+      idempotencyPayloadHash: 'h-te-failed',
+      parameters: {},
+      now: nowIso(),
+    });
+    const res = await request(app).post(`/api/generations/${failed.id}/resume`);
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('unprocessable');
+    expect(jobs.getById(failed.id)?.status).toBe('failed'); // never revived
+  });
+
+  it('rejects resume for a tracking-exhausted job with no provider task id with 422', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const noTask = plantTrackingExhausted(
+      created.body.prompt.id,
+      created.body.versions[0].id,
+      'src-te-notask',
+      null,
+    );
+    const res = await request(app).post(`/api/generations/${noTask.id}/resume`);
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('unprocessable');
+  });
+
+  it('rejects paid retry-as-new for a tracking-exhausted job with 422 (must resume instead)', async () => {
+    const created = await request(app).post('/api/prompts').send({ name: 'P', content: 'x' }).expect(201);
+    const job = plantTrackingExhausted(created.body.prompt.id, created.body.versions[0].id, 'src-te-retry');
+    const countBefore = jobs.list({ limit: 100 }).length;
+    const res = await request(app)
+      .post(`/api/generations/${job.id}/retry`)
+      .set('Idempotency-Key', 'T-te');
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('unprocessable');
+    // No new paid job was created.
+    expect(jobs.list({ limit: 100 })).toHaveLength(countBefore);
+  });
+});
+
 describe('body-parser failures keep the safe request-id / envelope contract', () => {
   it('returns 400 bad_request for malformed JSON with a real (non-unknown) request id', async () => {
     // Raw malformed JSON with an explicit application/json content type so the

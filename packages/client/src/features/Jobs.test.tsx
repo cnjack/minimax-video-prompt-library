@@ -19,6 +19,7 @@ vi.mock('../api/client.js', () => ({
     listJobs: vi.fn(),
     getJob: vi.fn(),
     retryJob: vi.fn(),
+    resumeJob: vi.fn(),
   },
   ApiClientError: class extends Error {
     readonly code: string;
@@ -39,6 +40,7 @@ import { api, ApiClientError } from '../api/client.js';
 const listJobs = vi.mocked(api.listJobs);
 const getJob = vi.mocked(api.getJob);
 const retryJob = vi.mocked(api.retryJob);
+const resumeJob = vi.mocked(api.resumeJob);
 
 function makeJob(o: Partial<GenerationJob> & { id: string }): GenerationJob {
   const defaults: GenerationJob = {
@@ -180,6 +182,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     listJobs.mockReset();
     getJob.mockReset();
     retryJob.mockReset();
+    resumeJob.mockReset();
     goSpy.mockReset();
   });
 
@@ -195,7 +198,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     );
     const user = userEvent.setup();
     renderDetail('j1');
-    const btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    const btn = await screen.findByRole('button', { name: /Regenerate/i });
 
     await user.click(btn);
     await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
@@ -215,7 +218,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     retryJob.mockResolvedValue({ job: makeJob({ id: 'j2', status: 'queued' }), reused: false });
     const user = userEvent.setup();
     renderDetail('j1');
-    const btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    const btn = await screen.findByRole('button', { name: /Regenerate/i });
     await user.click(btn);
     await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
     // A fresh (non-reused) retry navigates to the new job's detail view.
@@ -230,13 +233,13 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     retryJob.mockResolvedValue({ job: makeJob({ id: 'old-retry', status: 'failed' }), reused: true });
     const user = userEvent.setup();
     renderDetail('j1');
-    const btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    const btn = await screen.findByRole('button', { name: /Regenerate/i });
     await user.click(btn);
     // Instead of navigating to the stale failed job, it surfaces a message and
     // stays on the current job (no navigation; the retry button is still present).
     await waitFor(() => expect(screen.getByText(/already finished/i)).toBeInTheDocument());
     expect(goSpy).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /Retry as new job/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Regenerate/i })).toBeInTheDocument();
   });
 
   it('resets the retry token when the same instance navigates from job A to job B', async () => {
@@ -259,7 +262,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
 
     // Render the SAME mounted instance for failed job A and retry it.
     const { rerender } = renderDetail('job-A');
-    let btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    let btn = await screen.findByRole('button', { name: /Regenerate/i });
     await user.click(btn);
     await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
     const tokenA = retryJob.mock.calls[0]![1];
@@ -276,7 +279,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     // Wait until job B has loaded and rendered so the retry reflects B and the
     // token-reset effect has settled.
     await waitFor(() => expect(screen.getByText('job-B')).toBeInTheDocument());
-    btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    btn = await screen.findByRole('button', { name: /Regenerate/i });
     await user.click(btn);
     await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(2));
     const tokenB = retryJob.mock.calls[1]![1];
@@ -307,7 +310,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
 
     // Render the SAME mounted instance for failed job A and retry it.
     const { rerender } = renderDetail('job-A');
-    let btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    let btn = await screen.findByRole('button', { name: /Regenerate/i });
     await user.click(btn);
     await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
     const tokenA = retryJob.mock.calls[0]![1];
@@ -328,7 +331,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     await waitFor(() => expect(screen.getByText('job-A')).toBeInTheDocument());
 
     // Retrying A again must reuse A's RETAINED token (no second paid generation).
-    btn = await screen.findByRole('button', { name: /Retry as new job/i });
+    btn = await screen.findByRole('button', { name: /Regenerate/i });
     await user.click(btn);
     await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(2));
     expect(retryJob.mock.calls[1]![0]).toBe('job-A');
@@ -351,7 +354,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     const user = userEvent.setup();
 
     const { rerender } = renderDetail('job-A');
-    const btnA = await screen.findByRole('button', { name: /Retry as new job/i });
+    const btnA = await screen.findByRole('button', { name: /Regenerate/i });
     await user.click(btnA);
     await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
     const tokenA = retryJob.mock.calls[0]![1];
@@ -375,7 +378,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     expect(goSpy).not.toHaveBeenCalled();
     // The B view is intact and interactive.
     expect(screen.getByText('job-B')).toBeInTheDocument();
-    const btnB = await screen.findByRole('button', { name: /Retry as new job/i });
+    const btnB = await screen.findByRole('button', { name: /Regenerate/i });
     expect(btnB).not.toBeDisabled();
 
     // B's own retry uses B's OWN token (never A's) and navigates to B's job.
@@ -402,7 +405,7 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
     const user = userEvent.setup();
 
     const { rerender } = renderDetail('job-A');
-    const btnA = await screen.findByRole('button', { name: /Retry as new job/i });
+    const btnA = await screen.findByRole('button', { name: /Regenerate/i });
     await user.click(btnA);
     await waitFor(() => expect(retryJob).toHaveBeenCalledTimes(1));
 
@@ -427,6 +430,91 @@ describe('JobDetail retry (per-attempt Idempotency-Key token)', () => {
       expect(screen.queryByText(/A-only-failure/i)).not.toBeInTheDocument(),
     );
     expect(screen.getByText('job-B')).toBeInTheDocument();
+    expect(goSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('JobDetail resume vs regenerate (tracking-exhausted)', () => {
+  function renderDetail(jobId: string) {
+    return render(
+      <NavProvider>
+        <JobDetail jobId={jobId} />
+      </NavProvider>,
+    );
+  }
+
+  beforeEach(() => {
+    listJobs.mockReset();
+    getJob.mockReset();
+    retryJob.mockReset();
+    resumeJob.mockReset();
+    goSpy.mockReset();
+  });
+
+  it('shows Resume tracking (not Regenerate) for a tracking-exhausted job and resumes to running', async () => {
+    // getJob flips to running once resumeJob fires, mirroring the server keeping
+    // the SAME stored provider task id and re-polling it (no paid create).
+    let resumed = false;
+    getJob.mockImplementation(() =>
+      Promise.resolve(
+        makeJob({
+          id: 'te1',
+          status: resumed ? 'running' : 'tracking_exhausted',
+          providerTaskId: 'task-te1',
+          errorMessage: 'Tracking paused.',
+        }),
+      ),
+    );
+    resumeJob.mockImplementation(() => {
+      resumed = true;
+      return Promise.resolve(
+        makeJob({ id: 'te1', status: 'running', providerTaskId: 'task-te1' }),
+      );
+    });
+    const user = userEvent.setup();
+    renderDetail('te1');
+
+    const resumeBtn = await screen.findByRole('button', { name: /Resume tracking/i });
+    // No paid Regenerate action is offered for a stalled job.
+    expect(screen.queryByRole('button', { name: /Regenerate/i })).not.toBeInTheDocument();
+
+    await user.click(resumeBtn);
+    await waitFor(() => expect(resumeJob).toHaveBeenCalledWith('te1'));
+    // No paid retry-as-new was attempted.
+    expect(retryJob).not.toHaveBeenCalled();
+    // The job transitioned out of stalled (the Resume action is gone) -> running.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /Resume tracking/i })).not.toBeInTheDocument(),
+    );
+    expect(goSpy).not.toHaveBeenCalled();
+  });
+
+  it('shows Regenerate (not Resume tracking) for a genuine failed job', async () => {
+    getJob.mockResolvedValue(makeJob({ id: 'f1', status: 'failed', errorMessage: 'boom' }));
+    renderDetail('f1');
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Regenerate/i })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole('button', { name: /Resume tracking/i })).not.toBeInTheDocument();
+  });
+
+  it('surfaces a resume error without navigating away', async () => {
+    getJob.mockResolvedValue(
+      makeJob({ id: 'te2', status: 'tracking_exhausted', providerTaskId: 'task-te2' }),
+    );
+    resumeJob.mockRejectedValue(
+      new ApiClientError({
+        code: 'internal_error',
+        message: 'resume boom',
+        status: 500,
+        requestId: 'r',
+      }),
+    );
+    const user = userEvent.setup();
+    renderDetail('te2');
+    const resumeBtn = await screen.findByRole('button', { name: /Resume tracking/i });
+    await user.click(resumeBtn);
+    await waitFor(() => expect(screen.getByText(/resume boom/i)).toBeInTheDocument());
     expect(goSpy).not.toHaveBeenCalled();
   });
 });

@@ -30,7 +30,33 @@ and uses [Semantic Versioning](https://semver.org/).
   `aspect_ratio` column is retained for backward compatibility.
 - **Default `MINIMAX_BASE_URL`** is now `https://api.minimax.io`.
 
+### Fixed
+
+- **Paid async jobs survive transient read-path failures (P1).** An already-paid
+  asynchronous MiniMax job can no longer be terminal-failed by a transient
+  read-path blip. On HTTP-200 query/file-retrieve responses, a nonzero `base_resp`
+  in a retryable category (`rate_limit`, `provider_failure`) — and a `Success`
+  response temporarily missing `file_id`, or a retrieve response temporarily
+  missing `file.download_url` — now throw a typed `ProviderError` so the
+  server-side `JobPoller` keeps the queued/running row and counts the failure
+  against its bounded budget. A single transient read-path failure never becomes a
+  local terminal `failed`. (Definitive categories such as auth/moderation/balance
+  on the read path, and a genuine provider task `Fail`, remain genuine terminal
+  failures.)
+
 ### Added
+
+- **Recoverable tracking-exhausted outcome and Resume action.** When the poller's
+  bounded transient-failure budget is exhausted, a job is persisted as a clearly
+  distinguishable `tracking_exhausted` state (NOT `failed`): the provider task is
+  still assumed alive. A new `POST /api/generations/:id/resume` endpoint (and a
+  "Resume tracking" UI action) re-polls the SAME stored provider task id with NO
+  paid provider create. Resume is compare-and-set safe (only an exact
+  `tracking_exhausted` row with a nonempty provider task id is revived;
+  succeeded/failed/expired rows are never revived) and idempotent/concurrency-
+  safe. Paid retry-as-new is rejected for tracking-exhausted jobs; a genuine
+  provider `Fail` remains a terminal `failed` with an explicitly labeled
+  **Regenerate** action.
 
 - **Camera-movement preset chips** in the generation composer — Pan left,
   Pan right, Push in, Pull out, Tracking shot, and Static shot. Each chip

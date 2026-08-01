@@ -143,40 +143,76 @@ describe('mapQueryResult', () => {
     expect(out.failure?.category).toBe(ProviderErrorCategory.AUTH);
   });
 
-  it('converts Success WITHOUT a file_id into a recoverable failure', async () => {
-    const out = await mapQueryResult({
-      status: 'Success',
-      base_resp: { status_code: 0, status_msg: 'success' },
-    });
-    expect(out.status).toBe('failed');
-    expect(out.failure?.category).toBe(ProviderErrorCategory.PROVIDER_FAILURE);
-    expect(out.resultUrl).toBeUndefined();
+  it('keeps Success WITHOUT a file_id retryable (throws a transient ProviderError)', async () => {
+    await expect(
+      mapQueryResult({
+        status: 'Success',
+        base_resp: { status_code: 0, status_msg: 'success' },
+      }),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.PROVIDER_FAILURE });
   });
 
-  it('converts a retrieve base_resp error into a typed failure', async () => {
+  it('keeps a retryable retrieve base_resp error retryable (throws rate_limit)', async () => {
+    await expect(
+      mapQueryResult(
+        {
+          status: 'Success',
+          file_id: 'f1',
+          base_resp: { status_code: 0, status_msg: 'success' },
+        },
+        () => ({ base_resp: { status_code: 1002, status_msg: 'rate limited' } }),
+      ),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.RATE_LIMIT });
+  });
+
+  it('keeps Success whose retrieve yields no download_url retryable (throws)', async () => {
+    await expect(
+      mapQueryResult(
+        {
+          status: 'Success',
+          file_id: 'f1',
+          base_resp: { status_code: 0, status_msg: 'success' },
+        },
+        () => ({ file: {}, base_resp: { status_code: 0 } }),
+      ),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.PROVIDER_FAILURE });
+  });
+
+  // P1 regressions: a transient READ-PATH failure must never terminal-fail an
+  // already-paid job. Retryable categories (rate_limit / provider_failure) on the
+  // query or retrieve read path THROW a typed ProviderError so the poller keeps
+  // the row queued/running and counts it against its bounded budget. A definitive
+  // category (auth / moderation / balance / invalid request) on the read path is a
+  // genuine terminal failure; a genuine provider task `Fail` is always terminal.
+  it('keeps a rate_limit query base_resp retryable (throws rate_limit)', async () => {
+    await expect(
+      mapQueryResult({
+        status: 'Processing',
+        base_resp: { status_code: 1002, status_msg: 'rate limited' },
+      }),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.RATE_LIMIT });
+  });
+
+  it('keeps an unrecognized (provider_failure) query base_resp retryable (throws)', async () => {
+    await expect(
+      mapQueryResult({
+        status: 'Processing',
+        base_resp: { status_code: 9999, status_msg: 'boom' },
+      }),
+    ).rejects.toMatchObject({ category: ProviderErrorCategory.PROVIDER_FAILURE });
+  });
+
+  it('treats a DEFINITIVE (auth) retrieve base_resp as a genuine terminal failure', async () => {
     const out = await mapQueryResult(
       {
         status: 'Success',
         file_id: 'f1',
         base_resp: { status_code: 0, status_msg: 'success' },
       },
-      () => ({ base_resp: { status_code: 1002, status_msg: 'rate limited' } }),
+      () => ({ base_resp: { status_code: 1004, status_msg: 'bad key' } }),
     );
     expect(out.status).toBe('failed');
-    expect(out.failure?.category).toBe(ProviderErrorCategory.RATE_LIMIT);
-  });
-
-  it('converts Success whose retrieve yields no download_url into a failure', async () => {
-    const out = await mapQueryResult(
-      {
-        status: 'Success',
-        file_id: 'f1',
-        base_resp: { status_code: 0, status_msg: 'success' },
-      },
-      () => ({ file: {}, base_resp: { status_code: 0 } }),
-    );
-    expect(out.status).toBe('failed');
-    expect(out.failure?.message).toMatch(/download URL/i);
+    expect(out.failure?.category).toBe(ProviderErrorCategory.AUTH);
   });
 });
 

@@ -41,6 +41,14 @@ export function ErrorBanner({ message, code }: { message: string; code?: string 
   );
 }
 
+/**
+ * Friendlier labels for statuses whose raw enum value is not user-facing. Any
+ * status without an entry renders its raw value (existing single-word statuses).
+ */
+const STATUS_LABELS: Record<string, string> = {
+  tracking_exhausted: 'Tracking paused',
+};
+
 export function Badge({
   status,
   pulse,
@@ -49,7 +57,7 @@ export function Badge({
   pulse?: boolean;
 }) {
   const cls = pulse ? `badge ${status} dot` : `badge ${status}`;
-  return <span className={cls}>{status}</span>;
+  return <span className={cls}>{STATUS_LABELS[status] ?? status}</span>;
 }
 
 export function Tag({ name }: { name: string }) {

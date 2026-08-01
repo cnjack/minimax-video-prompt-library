@@ -4,7 +4,8 @@ A self-hostable, single-user workspace that combines a **versioned MiniMax Hailu
 video-prompt library** with **asynchronous Hailuo generation jobs**. Create reusable
 prompt templates, declare `{{variable}}` placeholders, render and validate before
 submitting, then watch jobs progress through `queued → running → succeeded` (or
-`failed`/`expired`) — all while MiniMax credentials stay server-side.
+`failed`/`expired`; a recoverable `tracking_exhausted` when the provider
+read-path budget is exhausted) — all while MiniMax credentials stay server-side.
 
 The product is a complete vertical slice: strict-TypeScript React/Vite UI, a
 Node/Express REST API, SQLite persistence, a deterministic mock provider **and**
@@ -182,12 +183,17 @@ The adapter targets the official MiniMax-Hailuo-2.3 general video contract:
 - Status is queried at `GET …/v1/query/video_generation?task_id=…` (`task_id` is a
   query parameter). The flat `status` (`Preparing`/`Queueing` → queued,
   `Processing` → running, `Success` → succeeded, `Fail` → failed) and `file_id`
-  are parsed. Every response carries `base_resp`; a nonzero `base_resp.status_code`
-  is a typed provider failure (1002 rate-limit, 1004 auth, 1026/1027 moderation).
+  are parsed. Every response carries `base_resp`. On the asynchronous **read
+  path**, a nonzero `base_resp.status_code` in a retryable category (1002
+  rate-limit, or an unrecognized/provider error) — and a `Success` temporarily
+  missing `file_id`, or a retrieve temporarily missing `download_url` — is a
+  **transient** failure: the poller keeps the queued/running row and counts it
+  against a bounded budget rather than terminal-failing the already-paid job. A
+  definitive category (1004 auth, 1026/1027 moderation, balance) on the read
+  path, and a genuine task `Fail`, are genuine terminal failures.
 - On `Success`, the returned `file_id` is resolved with
   `GET …/v1/files/retrieve?file_id=…` and `file.download_url` is surfaced as the
-  result. A success with no `file_id`, or a retrieve with no `download_url`, is
-  treated as a recoverable provider failure.
+  result.
 - A trailing slash on `MINIMAX_BASE_URL` is normalized automatically.
 
 The MiniMax-Hailuo-2.3 constraints are enforced **before** the request reaches
@@ -196,6 +202,31 @@ the provider: `prompt` ≤ 2000 characters, `duration` 6 or 10 seconds,
 text-to-video / first-frame image-to-video only. Last-frame and reference
 image/video/audio inputs are not supported by this model and are rejected by the
 API schema. See `packages/shared/src/video-policy.ts`.
+
+---
+
+## Paid-job tracking & recovery
+
+An asynchronous generation is **already paid** once the provider accepts it. The
+product is built so a transient hiccup while *reading* the provider never wastes
+that payment:
+
+- **Transient read-path failures stay retryable.** A rate-limit (`base_resp`
+  1002), a provider error, a `Success` that is briefly missing `file_id`, or a
+  file-retrieve that is briefly missing `download_url` is counted against the
+  poller's bounded budget (`POLL_MAX_ATTEMPTS`) — the job stays `queued`/
+  `running`. A single blip never terminal-fails a paid job.
+- **Tracking-exhausted is recoverable, not failed.** If the budget is exhausted
+  the job becomes `tracking_exhausted` (clearly distinct from `failed`): the
+  provider task is still assumed alive. The only recovery is **Resume**:
+  `POST /api/generations/:id/resume` (or the "Resume tracking" button) re-polls
+  the **same** stored provider task id with **no paid provider create**. Resume
+  is idempotent and concurrency-safe, and is allowed only for an exact
+  `tracking_exhausted` row that has a stored task id (succeeded/failed/expired
+  rows are never revived).
+- **No paid regeneration for stalled jobs.** Retry-as-new (Regenerate) is
+  rejected for `tracking_exhausted` jobs. A genuine provider task `Fail` remains a
+  terminal `failed` and offers an explicitly labeled **Regenerate** action.
 
 ---
 
@@ -211,7 +242,7 @@ API schema. See `packages/shared/src/video-policy.ts`.
 | `DB_PATH`            | `./data/h3-studio.db`         | SQLite file path (persist on a mounted volume in prod).              |
 | `SEED_SAMPLES`       | `true` (mock) / `false` (minimax) | Seed sample prompts when the DB is empty. Defaults off in `minimax` mode unless explicitly enabled. |
 | `POLL_INTERVAL_MS`   | `2000`                        | Poller sweep interval.                                               |
-| `POLL_MAX_ATTEMPTS`  | `120`                         | Consecutive provider failures before a job is marked failed.         |
+| `POLL_MAX_ATTEMPTS`  | `120`                         | Consecutive transient read-path failures before a job becomes `tracking_exhausted` (resumable; never a paid regeneration). |
 | `CLIENT_DIST`        | _(unset in dev)_              | Built client dir to serve (set by Docker for the single image).      |
 
 A starter template is in [`.env.example`](.env.example).
@@ -263,7 +294,9 @@ Coverage by intent (behavior and state transitions, not internals):
 - **Repositories** — SQLite create/search/version-restore/archived behavior and
   the idempotency-key uniqueness constraint.
 - **Generation service & poller** — idempotent reuse vs. conflict, unresolved
-  variables, and the queued→terminal job lifecycle.
+  variables, the queued→terminal job lifecycle, transient read-path failures
+  staying retryable, tracking-exhaustion → resume with zero paid creates, and the
+  compare-and-set guards (no revival of terminal/stalled rows).
 - **API (supertest)** — the core path: create prompt → version → render → submit
   mock generation → poll to success → history; plus validation, conflict, and
   request-id envelopes.

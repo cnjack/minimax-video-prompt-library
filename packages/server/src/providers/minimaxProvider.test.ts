@@ -244,19 +244,19 @@ describe('MinimaxProvider (MiniMax-Hailuo-2.3 /v1 contract)', () => {
     expect(out.failure?.category).toBe('content_moderation');
   });
 
-  it('converts Success without a file_id into a recoverable failure', async () => {
+  it('keeps Success without a file_id retryable (throws a transient ProviderError)', async () => {
     const provider = makeProvider(
       routingFetch(
         { task_id: 't1', base_resp: OK },
         { status: 'Success', base_resp: OK },
       ),
     );
-    const out = await provider.query('t1');
-    expect(out.status).toBe('failed');
-    expect(out.failure?.message).toMatch(/file_id/i);
+    await expect(provider.query('t1')).rejects.toMatchObject({
+      category: 'provider_failure',
+    });
   });
 
-  it('converts a retrieve base_resp error into a typed failure', async () => {
+  it('keeps a retryable retrieve base_resp error retryable (throws rate_limit)', async () => {
     const provider = makeProvider(
       routingFetch(
         { task_id: 't1', base_resp: OK },
@@ -264,9 +264,26 @@ describe('MinimaxProvider (MiniMax-Hailuo-2.3 /v1 contract)', () => {
         { base_resp: { status_code: 1002, status_msg: 'rate limited' } },
       ),
     );
-    const out = await provider.query('t1');
-    expect(out.status).toBe('failed');
-    expect(out.failure?.category).toBe('rate_limit');
+    await expect(provider.query('t1')).rejects.toMatchObject({
+      category: 'rate_limit',
+    });
+  });
+
+  // P1 core case: a single transient rate_limit on the query read path must
+  // throw (so the poller keeps the row and counts it), never terminal-fail.
+  it('keeps a rate_limit query base_resp retryable (throws rate_limit)', async () => {
+    const provider = makeProvider(
+      routingFetch(
+        { task_id: 't1', base_resp: OK },
+        {
+          status: 'Processing',
+          base_resp: { status_code: 1002, status_msg: 'rate limited' },
+        },
+      ),
+    );
+    await expect(provider.query('t1')).rejects.toMatchObject({
+      category: 'rate_limit',
+    });
   });
 
   it('normalizes a trailing slash on the base url', async () => {

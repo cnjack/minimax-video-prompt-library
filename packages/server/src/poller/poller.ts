@@ -108,14 +108,22 @@ export class JobPoller {
         error instanceof Error ? error.message : 'Unknown polling error.';
 
       if (attempts >= this.config.pollMaxAttempts) {
+        // Bounded budget exhausted: a recoverable-stalled outcome, NOT a genuine
+        // terminal failure. The provider task is still assumed alive; only a
+        // Resume (re-polling the SAME stored task id, no paid create) can move
+        // this row forward. Genuine provider `Fail` is applied above as a real
+        // terminal `failed` and never reaches this branch.
         this.failures.delete(jobId);
         this.jobs.updateStatus(jobId, {
-          status: 'failed',
+          status: 'tracking_exhausted',
           errorCode: category,
-          errorMessage: `Polling gave up after ${attempts} attempts: ${message}`,
+          errorMessage: `Tracking paused: the provider read path failed ${attempts} consecutive times (${category}). Resume to keep polling the same provider task.`,
           now: nowIso(),
         });
-        this.log('warn', `Job ${jobId} marked failed after ${attempts} poll failures.`);
+        this.log(
+          'warn',
+          `Job ${jobId} tracking-exhausted after ${attempts} transient poll failures; resumable.`,
+        );
       } else {
         this.log('warn', `Job ${jobId} poll failure ${attempts}: ${message}`);
       }

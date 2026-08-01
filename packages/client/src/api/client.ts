@@ -187,6 +187,14 @@ export const api = {
       headers: { 'Idempotency-Key': idempotencyKey },
     });
   },
+  /**
+   * Resume a tracking-exhausted job: re-poll the SAME stored provider task id
+   * with NO paid provider create. Idempotent/concurrency-safe; returns the
+   * (now running) job. Not a paid action, so it takes no idempotency key.
+   */
+  resumeJob(id: string): Promise<GenerationJob> {
+    return request(`/api/generations/${id}/resume`, { method: 'POST' });
+  },
 
   // Health + mock scenario control
   getHealth(): Promise<HealthStatus> {

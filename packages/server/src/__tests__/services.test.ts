@@ -444,7 +444,7 @@ describe('JobPoller: provider "succeeded" without a usable url', () => {
     });
   }
 
-  it('converts to a recoverable failed job (never an unretryable null-url succeeded)', async () => {
+  it('stays retryable (running) on a transient missing file_id — never a failed/null-url row', async () => {
     const detail = createPromptWithContent('render {{subject}}');
     const created = jobs.create({
       id: 'job-succ-no-url',
@@ -485,13 +485,229 @@ describe('JobPoller: provider "succeeded" without a usable url', () => {
     const poller = new JobPoller(jobs, provider, mockConfig);
     await poller.tick();
 
+    const after = jobs.getById(created.id);
+    // P1: a single transient read-path failure (Success without file_id) must NOT
+    // terminal-fail an already-paid job. It stays running and is counted against
+    // the poller's bounded budget (never a null-url succeeded, never failed).
+    expect(after?.status).toBe('running');
+    expect(after?.resultUrl).toBeNull();
+    expect(after?.completedAt).toBeNull();
+    expect(after?.errorCode).toBeNull();
+  });
+});
+
+describe('JobPoller: transient read-path failures stay retryable (P1)', () => {
+  interface RecordedCall {
+    url: string;
+    method?: string;
+  }
+  const OK = { status_code: 0, status_msg: 'success' };
+
+  /**
+   * Fake fetch that replays a SEQUENCE of query bodies (and retrieve bodies)
+   * across successive polls, so a transient read-path blip can be followed by a
+   * normal status. Records every call so a "no paid create" assertion is exact.
+   * The poller only ever GETs; create (POST /v1/video_generation) never fires.
+   */
+  function sequencedFetch(
+    queryBodies: unknown[],
+    retrieveBodies: unknown[] = [
+      { file: { download_url: 'https://x/v.mp4' }, base_resp: OK },
+    ],
+    calls: RecordedCall[] = [],
+  ): FetchLike {
+    let qi = 0;
+    let ri = 0;
+    return async (url, init) => {
+      calls.push({ url, method: init?.method });
+      let body: unknown;
+      if (url.includes('/v1/query/video_generation')) {
+        body = queryBodies[Math.min(qi, queryBodies.length - 1)];
+        qi += 1;
+      } else if (url.includes('/v1/files/retrieve')) {
+        body = retrieveBodies[Math.min(ri, retrieveBodies.length - 1)];
+        ri += 1;
+      } else {
+        body = {};
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      };
+    };
+  }
+
+  function plantRunningJob(id: string, providerTaskId: string) {
+    const detail = createPromptWithContent('render {{subject}}');
+    return jobs.create({
+      id,
+      promptId: detail.prompt.id,
+      promptVersionId: detail.versions[0]!.id,
+      renderedPrompt: 'render cat',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
+      firstFrameUrl: null,
+      lastFrameUrl: null,
+      referenceImageUrl: null,
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'running',
+      provider: 'minimax',
+      providerTaskId,
+      resultUrl: null,
+      errorCode: null,
+      errorMessage: null,
+      idempotencyKey: `k-${id}`,
+      idempotencyPayloadHash: `h-${id}`,
+      parameters: {},
+      now: nowIso(),
+    });
+  }
+
+  function minimax(fetch: FetchLike) {
+    return new MinimaxProvider({
+      baseUrl: 'https://api.minimax.io',
+      apiKey: 'test-key',
+      fetch,
+    });
+  }
+
+  it('a transient rate_limit query base_resp then Processing never terminal-fails', async () => {
+    const created = plantRunningJob('job-1002-then-proc', 'task-1002');
+    const provider = minimax(
+      sequencedFetch([
+        {
+          status: 'Processing',
+          base_resp: { status_code: 1002, status_msg: 'rate limited' },
+        },
+        { status: 'Processing', base_resp: OK },
+      ]),
+    );
+    const poller = new JobPoller(jobs, provider, mockConfig);
+    await poller.tick(); // 1002 -> counted, row retained (NOT failed)
+    expect(jobs.getById(created.id)?.status).toBe('running');
+    await poller.tick(); // Processing -> running
+    expect(jobs.getById(created.id)?.status).toBe('running');
+    // Never became a terminal failure from the single transient blip.
+    expect(jobs.getById(created.id)?.completedAt).toBeNull();
+  });
+
+  it('a transient retrieve rate_limit then a successful download stays retryable then succeeds', async () => {
+    const created = plantRunningJob('job-retrieve-1002', 'task-ret-1002');
+    const success = { task_id: 't', status: 'Success', file_id: 'f1', base_resp: OK };
+    const provider = minimax(
+      sequencedFetch(
+        [success, success],
+        [
+          { base_resp: { status_code: 1002, status_msg: 'rate limited' } },
+          { file: { download_url: 'https://x/v.mp4' }, base_resp: OK },
+        ],
+      ),
+    );
+    const poller = new JobPoller(jobs, provider, mockConfig);
+    await poller.tick(); // retrieve 1002 -> counted, row retained
+    expect(jobs.getById(created.id)?.status).toBe('running');
+    expect(jobs.getById(created.id)?.resultUrl).toBeNull();
+    await poller.tick(); // retrieve ok -> succeeded
     const final = jobs.getById(created.id);
-    // Not a null-resultUrl succeeded row; a recoverable failed one.
-    expect(final?.status).toBe('failed');
-    expect(final?.resultUrl).toBeNull();
-    expect(final?.errorCode).toBe('provider_failure');
-    expect(final?.errorMessage).toMatch(/file_id/i);
+    expect(final?.status).toBe('succeeded');
+    expect(final?.resultUrl).toBe('https://x/v.mp4');
+  });
+
+  it('a Success missing file_id then later present stays retryable then succeeds', async () => {
+    const created = plantRunningJob('job-no-fileid', 'task-no-fileid');
+    const provider = minimax(
+      sequencedFetch([
+        { status: 'Success', base_resp: OK }, // no file_id yet (transient)
+        { status: 'Success', file_id: 'f1', base_resp: OK }, // file_id now present
+      ]),
+    );
+    const poller = new JobPoller(jobs, provider, mockConfig);
+    await poller.tick(); // missing file_id -> counted, row retained
+    expect(jobs.getById(created.id)?.status).toBe('running');
+    await poller.tick(); // file_id present -> succeeded
+    expect(jobs.getById(created.id)?.status).toBe('succeeded');
+  });
+
+  it('exhausts the read-path budget into tracking_exhausted, then resumes the SAME task with ZERO create calls', async () => {
+    const calls: RecordedCall[] = [];
+    const created = plantRunningJob('job-exhaust', 'task-exhaust');
+    // Query ALWAYS returns a transient rate_limit: never a genuine provider Fail.
+    const provider = minimax(
+      sequencedFetch(
+        [{ status: 'Processing', base_resp: { status_code: 1002, status_msg: 'rate limited' } }],
+        undefined,
+        calls,
+      ),
+    );
+    const poller = new JobPoller(jobs, provider, mockConfig); // pollMaxAttempts = 5
+
+    for (let i = 0; i < mockConfig.pollMaxAttempts; i += 1) {
+      await poller.tick();
+    }
+    const exhausted = jobs.getById(created.id);
+    expect(exhausted?.status).toBe('tracking_exhausted');
+    expect(exhausted?.errorCode).toBe('rate_limit');
+    expect(exhausted?.providerTaskId).toBe('task-exhaust'); // unchanged
+    expect(exhausted?.completedAt).toBeNull(); // NOT a genuine terminal
+
+    // Resume must re-poll the SAME stored provider task id with NO paid create.
+    const svc = new GenerationService(
+      new VersionRepository(testDb.db),
+      jobs,
+      provider,
+      'minimax',
+    );
+    const resumed = svc.resume(created.id);
+    expect(resumed.status).toBe('running');
+    expect(resumed.providerTaskId).toBe('task-exhaust'); // SAME task, no new one
+    expect(resumed.errorCode).toBeNull(); // stale tracking error cleared
+
+    // No paid provider create (POST /v1/video_generation) ever happened — only
+    // GET reads. This is the core P1 recovery guarantee.
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+
+    // The resumed job is pollable again.
+    expect(jobs.listNonTerminal().map((j) => j.id)).toContain(created.id);
+
+    // Repeated resume is idempotent: a second resume resolves to the running row
+    // (the CAS matches no tracking_exhausted row) without error or paid create.
+    const again = svc.resume(created.id);
+    expect(again.status).toBe('running');
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  it('a genuine provider task Fail stays terminal failed (regeneratable, not resumable)', async () => {
+    const created = plantRunningJob('job-genuine-fail', 'task-genuine-fail');
+    const provider = minimax(sequencedFetch([{ status: 'Fail', base_resp: OK }]));
+    const poller = new JobPoller(jobs, provider, mockConfig);
+    await poller.tick();
+    const final = jobs.getById(created.id);
+    expect(final?.status).toBe('failed'); // genuine terminal
     expect(final?.completedAt).not.toBeNull();
+    expect(final?.errorCode).toBe('provider_failure');
+
+    // A genuine terminal failed job is regeneratable (retry-as-new) but NOT
+    // resumable: resume is rejected (only tracking_exhausted may resume). resume()
+    // is synchronous, so the rejection is asserted directly (not via `rejects`).
+    const svc = new GenerationService(
+      new VersionRepository(testDb.db),
+      jobs,
+      provider,
+      'minimax',
+    );
+    let thrown: unknown;
+    try {
+      svc.resume(created.id);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(ApiError);
+    expect((thrown as ApiError).code).toBe(ErrorCode.UNPROCESSABLE);
   });
 });
 

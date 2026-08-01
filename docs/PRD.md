@@ -58,6 +58,15 @@ when a key is configured.
 32. As a reviewer, I want type checking, linting, tests, and production builds to pass, so that the pull request is reviewable rather than a demo fragment.
 33. As a first-time user, I want useful sample prompts in mock mode and strong empty/loading/error states, so that I understand the product immediately.
 34. As a first-time user, I want a responsive, accessible interface with keyboard-reachable controls and visible focus, so that the tool feels production-ready.
+35. As a video creator, I want a transient provider read-path failure (a rate-limit,
+    a `Success` briefly missing its `file_id`, or a file-retrieve briefly missing its
+    `download_url`) to keep my already-paid job retrying instead of terminal-failing
+    it, so that a temporary blip never forces a second paid generation.
+36. As a video creator, when tracking an already-paid job has paused after repeated
+    transient failures, I want a Resume action that re-checks the SAME provider task
+    without spending another generation, so I never have to pay again to recover a
+    job that may still be alive. A genuine provider failure should still be clearly
+    terminal with a Regenerate action.
 
 ## Implementation Decisions
 

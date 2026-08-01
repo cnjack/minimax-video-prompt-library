@@ -374,6 +374,10 @@ button {
   background: rgba(255, 107, 107, 0.16);
   color: var(--danger);
 }
+.badge.tracking_exhausted {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 .badge.dot {
   display: inline-flex;
   align-items: center;

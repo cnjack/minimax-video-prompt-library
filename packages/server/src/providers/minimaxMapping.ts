@@ -23,8 +23,9 @@
  *   0 = success; 1002 = rate limit; 1004 = auth; 1026/1027 = sensitive content.
  */
 
-import { ProviderErrorCategory } from '@h3/shared';
+import { isRetryableProviderCategory, ProviderErrorCategory } from '@h3/shared';
 import type { JobStatus } from '@h3/shared';
+import { ProviderError } from './types.js';
 
 /**
  * Known MiniMax-Hailuo-2.3 task-status strings (flat top-level `status`),
@@ -194,23 +195,37 @@ export interface MappedQueryResult {
 }
 
 /**
- * Map a query response body into the local job outcome. On `Success`, the
- * returned `file_id` is resolved through the supplied `fileRetrieve` callback
- * (the provider wires it to `GET /v1/files/retrieve`), and `file.download_url`
- * becomes the result. A success with no `file_id`, a retrieve `base_resp`
- * error, or a missing `download_url` is surfaced as a recoverable failure so a
- * malformed success can never become an unretryable null-url succeeded row.
+ * Map a query response body into the local job outcome.
  *
- * Nonzero `base_resp.status_code` (on the query or the retrieve response) is
- * mapped to a typed failure.
+ * Read-path (transient) vs. genuine-terminal semantics are what protect an
+ * ALREADY-PAID asynchronous job from being terminal-failed by a transient
+ * read-path blip:
+ *
+ *  - A nonzero `base_resp` on the QUERY response, or on the file-retrieve
+ *    response, whose category is RETRYABLE (rate_limit / provider_failure)
+ *    THROWS a {@link ProviderError}. The poller catches it, RETAINS the queued/
+ *    running row, and counts it against its bounded transient-failure budget.
+ *    A single transient read-path failure therefore never becomes a local
+ *    terminal `failed`; persistent read-path failure exhausts the budget into a
+ *    recoverable `tracking_exhausted` (resumable, never a paid regeneration).
+ *  - A Success response temporarily missing `file_id`, and a retrieve response
+ *    temporarily missing `file.download_url`, likewise THROW (retryable) instead
+ *    of immediately orphaning a paid result.
+ *  - A nonzero `base_resp` whose category is DEFINITIVE (auth / moderation /
+ *    balance / invalid request) on the read path is a genuine terminal `failed`.
+ *  - A genuine provider task `Fail` status is a genuine terminal `failed`
+ *    (the only outcome that warrants a paid Regenerate).
  */
 export async function mapQueryResult(
   body: unknown,
   fileRetrieve: (fileId: string) => unknown | Promise<unknown> = () => undefined,
 ): Promise<MappedQueryResult> {
-  const baseFailure = baseRespFailure(body);
-  if (baseFailure) {
-    return { status: 'failed', failure: baseFailure };
+  const queryFailure = baseRespFailure(body);
+  if (queryFailure) {
+    if (isRetryableProviderCategory(queryFailure.category)) {
+      throw new ProviderError(queryFailure.category, queryFailure.message);
+    }
+    return { status: 'failed', failure: queryFailure };
   }
 
   const status = mapTaskStatus(readRawStatus(body));
@@ -218,34 +233,33 @@ export async function mapQueryResult(
   if (status === 'succeeded') {
     const fileId = extractFileId(body);
     if (!fileId) {
-      return {
-        status: 'failed',
-        failure: {
-          category: ProviderErrorCategory.PROVIDER_FAILURE,
-          message:
-            'MiniMax reported success but returned no file_id to retrieve.',
-        },
-      };
+      // Transient read-path gap on an already-paid Success: keep it retryable.
+      throw new ProviderError(
+        ProviderErrorCategory.PROVIDER_FAILURE,
+        'MiniMax reported success but returned no file_id to retrieve yet.',
+      );
     }
     const fileBody = await fileRetrieve(fileId);
     const retrieveFailure = baseRespFailure(fileBody);
     if (retrieveFailure) {
+      if (isRetryableProviderCategory(retrieveFailure.category)) {
+        throw new ProviderError(retrieveFailure.category, retrieveFailure.message);
+      }
       return { status: 'failed', failure: retrieveFailure };
     }
     const downloadUrl = extractDownloadUrl(fileBody);
     if (!downloadUrl) {
-      return {
-        status: 'failed',
-        failure: {
-          category: ProviderErrorCategory.PROVIDER_FAILURE,
-          message: 'MiniMax returned no usable download URL for the result.',
-        },
-      };
+      // Transient read-path gap: keep it retryable instead of orphaning a result.
+      throw new ProviderError(
+        ProviderErrorCategory.PROVIDER_FAILURE,
+        'MiniMax returned no usable download URL for the result yet.',
+      );
     }
     return { status: 'succeeded', resultUrl: downloadUrl };
   }
 
   if (status === 'failed') {
+    // Genuine provider task `Fail` — a real terminal outcome (Regenerate).
     return {
       status: 'failed',
       failure: {
