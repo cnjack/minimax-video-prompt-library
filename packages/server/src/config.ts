@@ -66,7 +66,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     dbPath,
     providerMode,
     minimaxApiKey,
-    minimaxBaseUrl: normalizeBaseUrl(env.MINIMAX_BASE_URL ?? 'https://api.minimaxi.com'),
+    minimaxBaseUrl: normalizeBaseUrl(env.MINIMAX_BASE_URL ?? 'https://api.minimax.io'),
     minimaxGroupId:
       (env.MINIMAX_GROUP_ID && env.MINIMAX_GROUP_ID.trim()) || null,
     pollIntervalMs: intOr(env.POLL_INTERVAL_MS, 2000),
@@ -117,7 +117,7 @@ function boolOr(value: string | undefined, fallback: boolean): boolean {
 
 /**
  * Normalize the MiniMax base URL: trim whitespace and strip trailing slashes so
- * the transport can safely concatenate `/v2/...` without producing `//v2/...`.
+ * the transport can safely concatenate `/v1/...` without producing `//v1/...`.
  */
 export function normalizeBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, '');

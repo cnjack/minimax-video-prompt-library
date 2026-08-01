@@ -5,10 +5,9 @@ import type { CreateJobInput } from './types.js';
 function input(scenario?: CreateJobInput['mockScenario']): CreateJobInput {
   return {
     renderedPrompt: 'deterministic prompt',
-    model: 'MiniMax-H3',
+    model: 'MiniMax-Hailuo-2.3',
     durationSeconds: 6,
-    aspectRatio: '16:9',
-    resolution: '2K',
+    resolution: '768P',
     mockScenario: scenario,
   };
 }

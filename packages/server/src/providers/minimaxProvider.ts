@@ -1,11 +1,17 @@
 /**
- * Real MiniMax H3 V2 adapter. Implements VideoProvider by building the
- * multimodal payload, calling the transport, and mapping provider state/errors
+ * Real MiniMax-Hailuo-2.3 adapter. Implements VideoProvider by building the
+ * flat request payload, calling the transport, and mapping provider state/errors
  * into the local job state machine. Credentials stay in the transport.
+ *
+ * Official endpoints (base URL defaults to https://api.minimax.io):
+ *  - POST /v1/video_generation            -> { task_id, base_resp }
+ *  - GET  /v1/query/video_generation?task_id=…  -> { task_id, status, file_id, base_resp }
+ *  - GET  /v1/files/retrieve?file_id=…    -> { file: { download_url }, base_resp }
  */
 
-import { H3_MODEL, ProviderErrorCategory } from '@h3/shared';
+import { MINIMAX_MODEL, ProviderErrorCategory } from '@h3/shared';
 import {
+  baseRespFailure,
   extractTaskId,
   mapQueryResult,
 } from './minimaxMapping.js';
@@ -48,15 +54,22 @@ export class MinimaxProvider implements VideoProvider {
   }
 
   async create(input: CreateJobInput): Promise<CreateJobOutput> {
-    if (input.model !== H3_MODEL) {
+    if (input.model !== MINIMAX_MODEL) {
       throw new ProviderError(
         ProviderErrorCategory.INVALID_REQUEST,
-        `Unsupported model "${input.model}". Only ${H3_MODEL} is supported.`,
+        `Unsupported model "${input.model}". Only ${MINIMAX_MODEL} is supported.`,
         400,
       );
     }
     const payload = buildCreatePayload(input);
-    const body = await this.transport.post('/v2/video_generation', payload);
+    const body = await this.transport.post('/v1/video_generation', payload);
+
+    // A nonzero base_resp on a 2xx create is a typed provider failure.
+    const failure = baseRespFailure(body);
+    if (failure) {
+      throw new ProviderError(failure.category, failure.message);
+    }
+
     const providerTaskId = extractTaskId(body);
     if (!providerTaskId) {
       throw new ProviderError(
@@ -68,11 +81,13 @@ export class MinimaxProvider implements VideoProvider {
   }
 
   async query(providerTaskId: string): Promise<QueryJobOutput> {
-    // Official H3 V2 query path: encode the task id as a path segment.
-    const body = await this.transport.get(
-      `/v2/query/video_generation/${encodeURIComponent(providerTaskId)}`,
+    // Official query route: task_id is a QUERY PARAMETER (not a path segment).
+    const body = await this.transport.get('/v1/query/video_generation', {
+      task_id: providerTaskId,
+    });
+    const mapped = await mapQueryResult(body, (fileId) =>
+      this.transport.get('/v1/files/retrieve', { file_id: fileId }),
     );
-    const mapped = mapQueryResult(body);
     return { providerTaskId, ...mapped };
   }
 }

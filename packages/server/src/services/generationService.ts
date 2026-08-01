@@ -8,8 +8,8 @@
 import {
   createGenerationSchema,
   ErrorCode,
-  H3_MAX_PROMPT_CHARS,
-  H3_MODEL,
+  MINIMAX_MAX_PROMPT_CHARS,
+  MINIMAX_MODEL,
   ProviderErrorCategory,
   renderTemplate,
   TemplateSyntaxError,
@@ -53,18 +53,19 @@ export class GenerationService {
       request.prompt,
     );
 
-    // Official H3 contract: the text item is capped at 7000 chars. Enforce on
-    // the rendered prompt (after substitution or the supplied override), server-
-    // side, BEFORE any job is created or the provider is called.
-    if (renderedPrompt.length > H3_MAX_PROMPT_CHARS) {
+    // Official MiniMax-Hailuo-2.3 contract: the `prompt` is capped at 2000 chars.
+    // Enforce on the rendered prompt (after substitution or the supplied
+    // override), server-side, BEFORE any job is created or the provider is
+    // called.
+    if (renderedPrompt.length > MINIMAX_MAX_PROMPT_CHARS) {
       throw new ApiError(
         ErrorCode.VALIDATION_ERROR,
-        `The rendered prompt is ${renderedPrompt.length} characters; MiniMax H3 accepts at most ${H3_MAX_PROMPT_CHARS}.`,
+        `The rendered prompt is ${renderedPrompt.length} characters; MiniMax-Hailuo-2.3 accepts at most ${MINIMAX_MAX_PROMPT_CHARS}.`,
         {
           status: 400,
           details: {
             length: renderedPrompt.length,
-            limit: H3_MAX_PROMPT_CHARS,
+            limit: MINIMAX_MAX_PROMPT_CHARS,
           },
         },
       );
@@ -75,13 +76,8 @@ export class GenerationService {
       values: request.values,
       prompt: request.prompt,
       durationSeconds: request.durationSeconds,
-      aspectRatio: request.aspectRatio,
       resolution: request.resolution,
       firstFrameUrl: request.firstFrameUrl,
-      lastFrameUrl: request.lastFrameUrl,
-      referenceImageUrl: request.referenceImageUrl,
-      referenceVideoUrl: request.referenceVideoUrl,
-      referenceAudioUrl: request.referenceAudioUrl,
     });
 
     const idempotencyKey = request.idempotencyKey ?? newId();
@@ -104,13 +100,8 @@ export class GenerationService {
       values: request.values,
       prompt: request.prompt ?? null,
       durationSeconds: request.durationSeconds,
-      aspectRatio: request.aspectRatio,
       resolution: request.resolution,
       firstFrameUrl: request.firstFrameUrl ?? null,
-      lastFrameUrl: request.lastFrameUrl ?? null,
-      referenceImageUrl: request.referenceImageUrl ?? null,
-      referenceVideoUrl: request.referenceVideoUrl ?? null,
-      referenceAudioUrl: request.referenceAudioUrl ?? null,
       mockScenario: request.mockScenario ?? null,
     };
 
@@ -121,15 +112,18 @@ export class GenerationService {
         promptId: version.promptId,
         promptVersionId: version.id,
         renderedPrompt,
-        model: H3_MODEL,
+        model: MINIMAX_MODEL,
         durationSeconds: request.durationSeconds,
-        aspectRatio: request.aspectRatio,
+        // MiniMax-Hailuo-2.3 has no aspect-ratio parameter; the column is kept
+        // for backward-compatible reads of historical jobs and stored as a
+        // model-native sentinel for new jobs.
+        aspectRatio: 'native',
         resolution: request.resolution,
         firstFrameUrl: request.firstFrameUrl ?? null,
-        lastFrameUrl: request.lastFrameUrl ?? null,
-        referenceImageUrl: request.referenceImageUrl ?? null,
-        referenceVideoUrl: request.referenceVideoUrl ?? null,
-        referenceAudioUrl: request.referenceAudioUrl ?? null,
+        lastFrameUrl: null,
+        referenceImageUrl: null,
+        referenceVideoUrl: null,
+        referenceAudioUrl: null,
         status: 'queued',
         provider: this.providerMode,
         providerTaskId: null,
@@ -166,15 +160,10 @@ export class GenerationService {
     try {
       const created = await this.provider.create({
         renderedPrompt,
-        model: H3_MODEL,
+        model: MINIMAX_MODEL,
         durationSeconds: request.durationSeconds,
-        aspectRatio: request.aspectRatio,
         resolution: request.resolution,
         firstFrameUrl: request.firstFrameUrl,
-        lastFrameUrl: request.lastFrameUrl,
-        referenceImageUrl: request.referenceImageUrl,
-        referenceVideoUrl: request.referenceVideoUrl,
-        referenceAudioUrl: request.referenceAudioUrl,
         mockScenario: request.mockScenario as MockScenario | undefined,
       });
       const updated = this.jobs.updateStatus(job.id, {
@@ -249,9 +238,11 @@ export class GenerationService {
 
   /**
    * Reconstruct a generation request from a job's persisted parameters plus the
-   * caller-supplied per-attempt idempotency token. Nullable media URLs are mapped
-   * back to `undefined` and an absent mock scenario is omitted so the request
-   * round-trips through the shared schema.
+   * caller-supplied per-attempt idempotency token. Only MiniMax-Hailuo-2.3
+   * supported fields are carried forward; legacy unsupported media (last frame,
+   * reference image/video/audio) and the obsolete aspect-ratio parameter are
+   * dropped so a retry targets the current model contract. An absent mock
+   * scenario is omitted so the request round-trips through the shared schema.
    */
   private buildRetryRequest(
     original: GenerationJob,
@@ -261,26 +252,16 @@ export class GenerationService {
       values?: Record<string, string>;
       prompt?: string | null;
       durationSeconds?: number;
-      aspectRatio?: string;
       resolution?: string;
       firstFrameUrl?: string | null;
-      lastFrameUrl?: string | null;
-      referenceImageUrl?: string | null;
-      referenceVideoUrl?: string | null;
-      referenceAudioUrl?: string | null;
       mockScenario?: MockScenario;
     };
     const request: Record<string, unknown> = {
       promptVersionId: original.promptVersionId,
       values: p.values ?? {},
       durationSeconds: p.durationSeconds,
-      aspectRatio: p.aspectRatio,
       resolution: p.resolution,
       firstFrameUrl: p.firstFrameUrl ?? undefined,
-      lastFrameUrl: p.lastFrameUrl ?? undefined,
-      referenceImageUrl: p.referenceImageUrl ?? undefined,
-      referenceVideoUrl: p.referenceVideoUrl ?? undefined,
-      referenceAudioUrl: p.referenceAudioUrl ?? undefined,
       idempotencyKey,
     };
     if (p.prompt && p.prompt.length > 0) {

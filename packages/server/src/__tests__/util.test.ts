@@ -3,9 +3,8 @@ import { compareCodeUnits, computePayloadHash, sortRecord } from '../util.js';
 
 const base = {
   promptVersionId: 'v1',
-  durationSeconds: 5,
-  aspectRatio: '16:9',
-  resolution: '2K',
+  durationSeconds: 6,
+  resolution: '768P',
 };
 
 describe('computePayloadHash determinism (locale-independent code-unit ordering)', () => {

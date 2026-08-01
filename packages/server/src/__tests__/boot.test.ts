@@ -18,7 +18,7 @@ function mockConfig(dbPath: string, port: number): AppConfig {
     dbPath,
     providerMode: 'mock',
     minimaxApiKey: null,
-    minimaxBaseUrl: 'https://api.minimaxi.com',
+    minimaxBaseUrl: 'https://api.minimax.io',
     minimaxGroupId: null,
     pollIntervalMs: 60_000,
     pollMaxAttempts: 5,

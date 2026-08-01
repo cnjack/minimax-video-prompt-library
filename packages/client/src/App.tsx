@@ -44,7 +44,7 @@ function Shell() {
           <div className="brand-mark">H3</div>
           <div>
             <div className="brand-name">Prompt Studio</div>
-            <div className="brand-sub">MiniMax H3 workspace</div>
+            <div className="brand-sub">MiniMax Hailuo workspace</div>
           </div>
         </div>
         <button

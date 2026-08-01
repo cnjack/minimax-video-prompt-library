@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/name: h3-prompt-studio
 data:
   # Default to deterministic mock mode. Set to "minimax" and supply the secret
-  # below to use the real MiniMax H3 API.
+  # below to use the real MiniMax Hailuo video API.
   PROVIDER_MODE: "mock"
   SEED_SAMPLES: "true"
   POLL_INTERVAL_MS: "2000"

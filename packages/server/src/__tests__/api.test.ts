@@ -21,7 +21,7 @@ const config: AppConfig = {
   dbPath: ':memory:',
   providerMode: 'mock',
   minimaxApiKey: null,
-  minimaxBaseUrl: 'https://api.minimaxi.com',
+  minimaxBaseUrl: 'https://api.minimax.io',
   minimaxGroupId: null,
   pollIntervalMs: 1000,
   pollMaxAttempts: 5,
@@ -113,8 +113,7 @@ describe('Core generation path', () => {
         promptVersionId: versionId,
         values: { subject: 'a car' },
         durationSeconds: 6,
-        aspectRatio: '16:9',
-        resolution: '2K',
+        resolution: '768P',
         idempotencyKey: 'api-key-1',
       })
       .expect(201);
@@ -143,8 +142,7 @@ describe('Core generation path', () => {
         promptVersionId: versionId,
         values: { subject: 'a car' },
         durationSeconds: 6,
-        aspectRatio: '16:9',
-        resolution: '2K',
+        resolution: '768P',
         idempotencyKey: 'api-key-1',
       })
       .expect(200);
@@ -161,13 +159,13 @@ describe('Core generation path', () => {
 
     const badDuration = await request(app)
       .post('/api/generations')
-      .send({ promptVersionId: versionId, values: {}, durationSeconds: 3, aspectRatio: '16:9', resolution: '2K' });
+      .send({ promptVersionId: versionId, values: {}, durationSeconds: 3, resolution: '768P' });
     expect(badDuration.status).toBe(400);
     expect(badDuration.body.error.code).toBe('validation_error');
 
     const badUrl = await request(app)
       .post('/api/generations')
-      .send({ promptVersionId: versionId, values: {}, durationSeconds: 4, aspectRatio: '16:9', resolution: '2K', firstFrameUrl: 'ftp://x/y.png' });
+      .send({ promptVersionId: versionId, values: {}, durationSeconds: 6, resolution: '768P', firstFrameUrl: 'ftp://x/y.png' });
     expect(badUrl.status).toBe(400);
   });
 
@@ -181,9 +179,8 @@ describe('Core generation path', () => {
     const base = {
       promptVersionId: versionId,
       values: { a: '1' },
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
       idempotencyKey: 'conflict-key',
     };
     await request(app).post('/api/generations').send(base).expect(201);
@@ -226,8 +223,8 @@ describe('Core generation path', () => {
   });
 });
 
-describe('aspect ratio / frame mode API rejection', () => {
-  it('rejects first-frame mode with a concrete ratio (requires adaptive)', async () => {
+describe('Hailuo-2.3 API contract enforcement', () => {
+  it('rejects an unsupported aspect ratio (no ratio parameter)', async () => {
     const created = await request(app)
       .post('/api/prompts')
       .send({ name: 'P', content: 'x' })
@@ -239,16 +236,54 @@ describe('aspect ratio / frame mode API rejection', () => {
       .send({
         promptVersionId: versionId,
         values: {},
-        durationSeconds: 5,
+        durationSeconds: 6,
         aspectRatio: '16:9',
-        resolution: '2K',
-        firstFrameUrl: 'https://example.com/a.png',
+        resolution: '768P',
       });
     expect(bad.status).toBe(400);
     expect(bad.body.error.code).toBe('validation_error');
   });
 
-  it('accepts first-frame mode with adaptive', async () => {
+  it('rejects 10s at 1080P (10s only at 768P)', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    const versionId = created.body.versions[0].id as string;
+
+    const bad = await request(app)
+      .post('/api/generations')
+      .send({
+        promptVersionId: versionId,
+        values: {},
+        durationSeconds: 10,
+        resolution: '1080P',
+      });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error.code).toBe('validation_error');
+  });
+
+  it('rejects unsupported reference media', async () => {
+    const created = await request(app)
+      .post('/api/prompts')
+      .send({ name: 'P', content: 'x' })
+      .expect(201);
+    const versionId = created.body.versions[0].id as string;
+
+    const bad = await request(app)
+      .post('/api/generations')
+      .send({
+        promptVersionId: versionId,
+        values: {},
+        durationSeconds: 6,
+        resolution: '768P',
+        referenceImageUrl: 'https://example.com/c.png',
+      });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error.code).toBe('validation_error');
+  });
+
+  it('accepts first-frame image-to-video', async () => {
     const created = await request(app)
       .post('/api/prompts')
       .send({ name: 'P', content: 'x' })
@@ -260,9 +295,8 @@ describe('aspect ratio / frame mode API rejection', () => {
       .send({
         promptVersionId: versionId,
         values: {},
-        durationSeconds: 5,
-        aspectRatio: 'adaptive',
-        resolution: '2K',
+        durationSeconds: 6,
+        resolution: '1080P',
         firstFrameUrl: 'https://example.com/a.png',
       })
       .expect(201);
@@ -276,10 +310,10 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
       promptId,
       promptVersionId: versionId,
       renderedPrompt: 'x',
-      model: 'MiniMax-H3',
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
       firstFrameUrl: null,
       lastFrameUrl: null,
       referenceImageUrl: null,
@@ -307,9 +341,8 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
     const versionId = created.body.versions[0].id as string;
     const failed = plantFailedJob(promptId, versionId, 'src-failed', {
       values: {},
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
       mockScenario: 'success',
     });
 
@@ -351,7 +384,7 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
       created.body.prompt.id,
       created.body.versions[0].id,
       'src-failed-bad',
-      { values: {}, durationSeconds: 5, aspectRatio: '16:9', resolution: '2K', mockScenario: 'success' },
+      { values: {}, durationSeconds: 6, resolution: '768P', mockScenario: 'success' },
     );
     // A header containing a space is not a valid bounded token.
     const bad = await request(app)
@@ -367,12 +400,13 @@ describe('retry idempotency (per-attempt Idempotency-Key header)', () => {
       .post('/api/prompts')
       .send({ name: 'P', content: 'x' })
       .expect(201);
-    // Corrupt persisted params: an unsupported aspect ratio and missing duration.
+    // Corrupt persisted params: missing duration (cannot retry under the
+    // current model contract).
     const failed = plantFailedJob(
       created.body.prompt.id,
       created.body.versions[0].id,
       'src-failed-corrupt',
-      { values: {}, aspectRatio: 'bogus', resolution: '2K' },
+      { values: {}, resolution: '768P' },
     );
 
     const res = await request(app)

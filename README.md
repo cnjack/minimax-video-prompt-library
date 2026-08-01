@@ -1,14 +1,14 @@
 # H3 Prompt Studio
 
-A self-hostable, single-user workspace that combines a **versioned MiniMax H3
-video-prompt library** with **asynchronous H3 generation jobs**. Create reusable
+A self-hostable, single-user workspace that combines a **versioned MiniMax Hailuo
+video-prompt library** with **asynchronous Hailuo generation jobs**. Create reusable
 prompt templates, declare `{{variable}}` placeholders, render and validate before
 submitting, then watch jobs progress through `queued → running → succeeded` (or
 `failed`/`expired`) — all while MiniMax credentials stay server-side.
 
 The product is a complete vertical slice: strict-TypeScript React/Vite UI, a
 Node/Express REST API, SQLite persistence, a deterministic mock provider **and**
-a real MiniMax-H3 V2 adapter behind one `VideoProvider` interface, server-side
+a real MiniMax-Hailuo-2.3 adapter behind one `VideoProvider` interface, server-side
 polling, validation, and idempotency. It runs end-to-end with **no MiniMax key**
 in deterministic mock mode and switches to the real server-side API when a key is
 configured.
@@ -22,17 +22,18 @@ configured.
 
 - **Versioned prompt library** — immutable versions, restore-as-new-head,
   duplicate, archive (never delete), full-text + tag/status filters.
-- **H3 camera-motion chips** — one-click camera cues (Pan left/right, Push in,
+- **Camera-motion chips** — one-click camera cues (Pan left/right, Push in,
   Pull out, Tracking shot, Static shot) insert at the prompt cursor in the
   generation composer, preserving surrounding text; the cue-augmented prompt is
-  still validated through the H3 policy before submission.
+  still validated through the MiniMax policy before submission.
 - **Pure template engine** — `{{variable}}` parsing/rendering with name
   validation (letters, numbers, `_`, `.`, `-`), duplicate normalization, and
   rejection of blank/unresolved variables.
-- **Honest H3 policy** — durations 4–15s, explicit non-adaptive aspect ratios,
-  resolution represented as `2K` only, in one server-side policy module.
+- **Honest Hailuo-2.3 policy** — prompt ≤ 2000 chars, durations 6 or 10 seconds,
+  resolution `768P`/`1080P` (10s only at `768P`), text-to-video and first-frame
+  image-to-video only — in one server-side policy module.
 - **Two providers, one interface** — deterministic mock (success/failure/expired/
-  provider_error/slow scenarios) and the real MiniMax H3 V2 adapter; selected by
+  provider_error/slow scenarios) and the real MiniMax-Hailuo-2.3 adapter; selected by
   configuration, never falling back silently.
 - **Async + idempotent** — jobs return immediately with a local id, the server
   polls the provider (not the browser), submissions are de-duplicated by an
@@ -56,7 +57,7 @@ A pnpm workspace with three packages and strict TypeScript throughout:
 
 ```
 packages/
-  shared/   # contract: types, zod schemas, template engine, H3 policy, errors
+  shared/   # contract: types, zod schemas, template engine, video policy, errors
   server/   # Node + Express REST API, SQLite, providers, poller
   client/   # React + Vite SPA (imports shared types only — never server impl)
 ```
@@ -77,7 +78,7 @@ packages/
 
 ```
 ┌────────────┐   /api/*   ┌─────────────────────┐    HTTPS    ┌──────────────┐
-│  React UI  │ ─────────▶ │  Express API        │ ─────────▶  │  MiniMax H3  │
+│  React UI  │ ─────────▶ │  Express API        │ ─────────▶  │  MiniMax Hailuo  │
 │ (Vite)     │ ◀───────── │  SQLite + poller    │ ◀────────── │  (or mock)   │
 └────────────┘  job state  └─────────────────────┘   states    └──────────────┘
 ```
@@ -123,7 +124,7 @@ curl -X PUT localhost:3001/api/debug/mock -H 'Content-Type: application/json' \
 
 ## Camera-movement preset chips (composer)
 
-MiniMax's H3 guide recommends camera-motion cues (pan, push/pull, tracking,
+MiniMax's Hailuo guide recommends camera-motion cues (pan, push/pull, tracking,
 static). The generation composer offers them as keyboard-reachable chips so you
 don't have to remember or retype the phrasing:
 
@@ -147,8 +148,8 @@ don't have to remember or retype the phrasing:
   values. **Reset to rendered** re-syncs the prompt to the current values (then
   re-apply any camera cues) to submit a consistent prompt.
 - The exact text shown is what is generated, sent as a `prompt` override and
-  still validated through the existing H3 request policy (the 7000-character
-  limit, duration, ratio, and media rules) before submission. Server-side, the
+  still validated through the existing MiniMax request policy (the 2000-character
+  limit, duration, and resolution rules) before submission. Server-side, the
   immutable version is *also* validated with the supplied `values` even when an
   override is present, so an unresolved variable or template error always fails
   before any job or provider call.
@@ -159,7 +160,7 @@ UI.
 
 ---
 
-## Using the real MiniMax H3 API
+## Using the real MiniMax Hailuo API
 
 Real mode is selected by configuration and **fails visibly** when the key is
 absent — it never silently falls back to mock.
@@ -167,33 +168,34 @@ absent — it never silently falls back to mock.
 ```bash
 export PROVIDER_MODE=minimax
 export MINIMAX_API_KEY=sk-...        # server-side only; never commit
-# optional: export MINIMAX_GROUP_ID=... MINIMAX_BASE_URL=https://api.minimaxi.com
+# optional: export MINIMAX_GROUP_ID=... MINIMAX_BASE_URL=https://api.minimax.io
 pnpm dev:server
 ```
 
-The adapter targets the official H3 V2 contract:
+The adapter targets the official MiniMax-Hailuo-2.3 general video contract:
 
-- `POST {MINIMAX_BASE_URL}/v2/video_generation` with model `MiniMax-H3`.
-- The body uses top-level **`ratio`** (not `aspect_ratio`) and a multimodal
-  `content[]` array: one text item (max **7000** rendered characters) plus
-  independent media items, each tagged with a `role`:
-  `{type:"image_url",image_url:{url},role:"first_frame|last_frame|reference_image"}`,
-  `{type:"video_url",video_url:{url},role:"reference_video"}`,
-  `{type:"audio_url",audio_url:{url},role:"reference_audio"}`.
-- Status is queried at `GET …/v2/query/video_generation/{task_id}` (the task id
-  is a path segment, URL-encoded). The nested `task.status` /
-  `task.content.url` / `task.error` are parsed; provider HTTP errors use the
-  OpenAI-style envelope `{error:{type,message,http_code}}` and are classified by
-  `http_code` (400/401/402/422/429/500/529).
+- `POST {MINIMAX_BASE_URL}/v1/video_generation` with model `MiniMax-Hailuo-2.3`.
+  The body is **flat**: `{ model, prompt, duration, resolution }` (text-to-video),
+  plus `first_frame_image` for image-to-video. There is **no** `content[]` array,
+  `role`, or `ratio`/`aspect_ratio` field. The `prompt` is capped at **2000**
+  rendered characters.
+- Status is queried at `GET …/v1/query/video_generation?task_id=…` (`task_id` is a
+  query parameter). The flat `status` (`Preparing`/`Queueing` → queued,
+  `Processing` → running, `Success` → succeeded, `Fail` → failed) and `file_id`
+  are parsed. Every response carries `base_resp`; a nonzero `base_resp.status_code`
+  is a typed provider failure (1002 rate-limit, 1004 auth, 1026/1027 moderation).
+- On `Success`, the returned `file_id` is resolved with
+  `GET …/v1/files/retrieve?file_id=…` and `file.download_url` is surfaced as the
+  result. A success with no `file_id`, or a retrieve with no `download_url`, is
+  treated as a recoverable provider failure.
 - A trailing slash on `MINIMAX_BASE_URL` is normalized automatically.
 
-The H3 constraints are enforced **before** the request reaches the provider:
-durations 4–15s, `resolution` 2K, and the conditional `ratio` + media rules
-(text-to-video needs a concrete ratio; first/last-frame is `adaptive`; reference
-mode may use either). Media cross-field rules are also enforced: first/last-frame
-mode and reference media are mutually exclusive, `last_frame` requires
-`first_frame`, and reference audio requires a reference image or video. See
-`packages/shared/src/h3-policy.ts`.
+The MiniMax-Hailuo-2.3 constraints are enforced **before** the request reaches
+the provider: `prompt` ≤ 2000 characters, `duration` 6 or 10 seconds,
+`resolution` `768P` or `1080P` (10 seconds is only supported at `768P`), and
+text-to-video / first-frame image-to-video only. Last-frame and reference
+image/video/audio inputs are not supported by this model and are rejected by the
+API schema. See `packages/shared/src/video-policy.ts`.
 
 ---
 
@@ -204,7 +206,7 @@ mode and reference media are mutually exclusive, `last_frame` requires
 | `PROVIDER_MODE`      | `mock`                        | `mock` or `minimax`.                                                 |
 | `MINIMAX_API_KEY`    | _(unset)_                     | Required for `minimax`. Read server-side only.                       |
 | `MINIMAX_GROUP_ID`   | _(unset)_                     | Optional MiniMax group id.                                           |
-| `MINIMAX_BASE_URL`   | `https://api.minimaxi.com`    | MiniMax API base URL.                                                |
+| `MINIMAX_BASE_URL`   | `https://api.minimax.io`    | MiniMax API base URL.                                                |
 | `PORT`               | `3001`                        | HTTP port.                                                           |
 | `DB_PATH`            | `./data/h3-studio.db`         | SQLite file path (persist on a mounted volume in prod).              |
 | `SEED_SAMPLES`       | `true` (mock) / `false` (minimax) | Seed sample prompts when the DB is empty. Defaults off in `minimax` mode unless explicitly enabled. |
@@ -251,11 +253,11 @@ pnpm -r run test
 Coverage by intent (behavior and state transitions, not internals):
 
 - **Template engine & validation** — parsing/rendering, variable-name rules,
-  duplicate normalization, blank/unresolved rejection, and H3 duration (4/15
-  boundaries) + all aspect ratios + http(s) URL validation.
-- **MiniMax mapping** — request payload (`content` array), task-status → local
-  state, and HTTP error → category mapping through a **fake HTTP transport**
-  (no paid calls).
+  duplicate normalization, blank/unresolved rejection, and Hailuo duration
+  (6/10) + resolution (768P/1080P, 10s only at 768P) + http(s) URL validation.
+- **MiniMax mapping** — flat `/v1` request payload, flat task-status → local
+  state, `base_resp` error → category mapping, and `file_id` → `download_url`
+  retrieval through a **fake HTTP transport** (no paid calls).
 - **Mock provider** — deterministic queued→running→succeeded/failed/expired
   transitions, stable result URLs, create-time `provider_error`.
 - **Repositories** — SQLite create/search/version-restore/archived behavior and
@@ -300,8 +302,7 @@ curl -X POST localhost:3001/api/generations -H 'Content-Type: application/json' 
   "promptVersionId": "<version-id>",
   "values": { "subject": "a car" },
   "durationSeconds": 6,
-  "aspectRatio": "16:9",
-  "resolution": "2K",
+  "resolution": "768P",
   "idempotencyKey": "unique-per-attempt"
 }'
 ```

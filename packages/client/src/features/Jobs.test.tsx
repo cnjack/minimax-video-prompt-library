@@ -46,10 +46,10 @@ function makeJob(o: Partial<GenerationJob> & { id: string }): GenerationJob {
     promptId: 'p1',
     promptVersionId: 'v1',
     renderedPrompt: 'x',
-    model: 'MiniMax-H3',
-    durationSeconds: 5,
-    aspectRatio: '16:9',
-    resolution: '2K',
+    model: 'MiniMax-Hailuo-2.3',
+    durationSeconds: 6,
+    aspectRatio: 'native',
+    resolution: '768P',
     firstFrameUrl: null,
     lastFrameUrl: null,
     referenceImageUrl: null,
@@ -71,8 +71,8 @@ function makeJob(o: Partial<GenerationJob> & { id: string }): GenerationJob {
   return { ...defaults, ...o };
 }
 
-const allJob = makeJob({ id: 'all-1', aspectRatio: '21:9' });
-const failedJob = makeJob({ id: 'failed-1', status: 'failed', aspectRatio: '9:16' });
+const allJob = makeJob({ id: 'all-1', resolution: '1080P' });
+const failedJob = makeJob({ id: 'failed-1', status: 'failed' });
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -100,7 +100,7 @@ describe('JobsList filter cancellation', () => {
   it('renders jobs for the initial filter', async () => {
     listJobs.mockResolvedValue({ items: [allJob], total: 1 });
     renderJobsList();
-    await waitFor(() => expect(screen.getByText(/21:9/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/1080P/)).toBeInTheDocument());
   });
 
   it('ignores a stale response from a previous filter (defensive guard)', async () => {
@@ -120,14 +120,14 @@ describe('JobsList filter cancellation', () => {
     // Switch the filter to "failed" while the "all" request is still pending.
     const select = screen.getByLabelText(/Filter by status/i);
     await user.selectOptions(select, 'failed');
-    await waitFor(() => expect(screen.getByText(/9:16/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/768P/)).toBeInTheDocument());
 
     // Now the stale "all" response arrives. It must NOT overwrite "failed".
     allDeferred.resolve({ items: [allJob], total: 1 });
     await waitFor(() => {
-      expect(screen.queryByText(/21:9/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/1080P/)).not.toBeInTheDocument();
     });
-    expect(screen.getByText(/9:16/)).toBeInTheDocument();
+    expect(screen.getByText(/768P/)).toBeInTheDocument();
     expect(screen.queryByText(/Failed to load jobs/i)).not.toBeInTheDocument();
   });
 
@@ -160,10 +160,10 @@ describe('JobsList filter cancellation', () => {
     const select = screen.getByLabelText(/Filter by status/i);
     await user.selectOptions(select, 'failed');
 
-    await waitFor(() => expect(screen.getByText(/9:16/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/768P/)).toBeInTheDocument());
     // The aborted "all" request must not surface as a user-facing error.
     expect(screen.queryByText(/Failed to load jobs/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/21:9/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/1080P/)).not.toBeInTheDocument();
   });
 });
 

@@ -27,7 +27,7 @@ const mockConfig: AppConfig = {
   dbPath: ':memory:',
   providerMode: 'mock',
   minimaxApiKey: null,
-  minimaxBaseUrl: 'https://api.minimaxi.com',
+  minimaxBaseUrl: 'https://api.minimax.io',
   minimaxGroupId: null,
   pollIntervalMs: 1000,
   pollMaxAttempts: 5,
@@ -188,9 +188,8 @@ describe('GenerationService idempotency', () => {
     return {
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
-      durationSeconds: 5,
-      aspectRatio: '16:9' as const,
-      resolution: '2K' as const,
+      durationSeconds: 6,
+      resolution: '768P' as const,
       ...overrides,
     };
   }
@@ -218,9 +217,8 @@ describe('GenerationService idempotency', () => {
     const result = await generationService.create({
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
       mockScenario: 'provider_error',
     });
     expect(result.job.status).toBe('failed');
@@ -233,24 +231,22 @@ describe('GenerationService idempotency', () => {
       generationService.create({
         promptVersionId: detail.versions[0]!.id,
         values: {},
-        durationSeconds: 5,
-        aspectRatio: '16:9',
-        resolution: '2K',
+        durationSeconds: 6,
+        resolution: '768P',
       }),
     ).rejects.toMatchObject({ code: ErrorCode.UNRESOLVED_VARIABLE });
   });
 
-  it('rejects a rendered prompt exceeding the 7000-char H3 limit before submission', async () => {
-    // A variable whose value pushes the rendered prompt past 7000 chars.
+  it('rejects a rendered prompt exceeding the 2000-char Hailuo limit before submission', async () => {
+    // A variable whose value pushes the rendered prompt past 2000 chars.
     const detail = createPromptWithContent('prefix {{huge}}');
-    const oversized = 'x'.repeat(7000);
+    const oversized = 'x'.repeat(2001);
     await expect(
       generationService.create({
         promptVersionId: detail.versions[0]!.id,
         values: { huge: oversized },
-        durationSeconds: 5,
-        aspectRatio: '16:9',
-        resolution: '2K',
+        durationSeconds: 6,
+        resolution: '768P',
       }),
     ).rejects.toMatchObject({ code: ErrorCode.VALIDATION_ERROR, status: 400 });
 
@@ -258,18 +254,17 @@ describe('GenerationService idempotency', () => {
     expect(jobs.list({ limit: 100 })).toHaveLength(0);
   });
 
-  it('accepts a rendered prompt exactly at the 7000-char boundary', async () => {
-    // Build a template that renders to exactly 7000 chars.
-    const filler = 'y'.repeat(6999);
+  it('accepts a rendered prompt exactly at the 2000-char boundary', async () => {
+    // Build a template that renders to exactly 2000 chars.
+    const filler = 'y'.repeat(1999);
     const detail = createPromptWithContent(`${filler}{{a}}`);
     const result = await generationService.create({
       promptVersionId: detail.versions[0]!.id,
       values: { a: 'z' },
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
     });
-    expect(result.job.renderedPrompt).toHaveLength(7000);
+    expect(result.job.renderedPrompt).toHaveLength(2000);
   });
 });
 
@@ -280,25 +275,23 @@ describe('GenerationService prompt override (camera cues)', () => {
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
       prompt: 'a cat, tracking shot',
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
     });
     expect(result.job.renderedPrompt).toBe('a cat, tracking shot');
   });
 
-  it('still enforces the H3 char limit on the supplied prompt before submission', async () => {
+  it('still enforces the Hailuo char limit on the supplied prompt before submission', async () => {
     const detail = createPromptWithContent('render {{subject}}');
     await expect(
       generationService.create({
         promptVersionId: detail.versions[0]!.id,
         // Resolved values so the version itself validates; the oversized
-        // override (not the version) is what must trip the H3 char limit.
+        // override (not the version) is what must trip the char limit.
         values: { subject: 'cat' },
-        prompt: 'x'.repeat(7001),
-        durationSeconds: 5,
-        aspectRatio: '16:9',
-        resolution: '2K',
+        prompt: 'x'.repeat(2001),
+        durationSeconds: 6,
+        resolution: '768P',
       }),
     ).rejects.toMatchObject({ code: ErrorCode.VALIDATION_ERROR, status: 400 });
     // No job row created (enforced before persistence).
@@ -311,9 +304,8 @@ describe('GenerationService prompt override (camera cues)', () => {
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
       prompt: '   ',
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
     });
     expect(result.job.renderedPrompt).toBe('render cat');
   });
@@ -323,9 +315,8 @@ describe('GenerationService prompt override (camera cues)', () => {
     const base = {
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
-      durationSeconds: 5,
-      aspectRatio: '16:9' as const,
-      resolution: '2K' as const,
+      durationSeconds: 6,
+      resolution: '768P' as const,
       idempotencyKey: 'k-prompt',
     };
     const first = await generationService.create({ ...base, prompt: 'pan left' });
@@ -352,9 +343,8 @@ describe('GenerationService prompt override (camera cues)', () => {
         promptVersionId: detail.versions[0]!.id,
         values: {},
         prompt: 'a cat, tracking shot',
-        durationSeconds: 5,
-        aspectRatio: '16:9',
-        resolution: '2K',
+        durationSeconds: 6,
+        resolution: '768P',
       }),
     ).rejects.toMatchObject({ code: ErrorCode.UNRESOLVED_VARIABLE });
     // No job row created (validated before persistence).
@@ -369,9 +359,8 @@ describe('GenerationService prompt override (camera cues)', () => {
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
       prompt: 'a cat, tracking shot',
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
     });
     expect(result.job.renderedPrompt).toBe('a cat, tracking shot');
   });
@@ -386,9 +375,8 @@ describe('GenerationService retry retains camera-cue override', () => {
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
       prompt: 'a cat, tracking shot',
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
       mockScenario: 'provider_error',
     });
     expect(first.job.status).toBe('failed');
@@ -413,9 +401,8 @@ describe('JobPoller lifecycle', () => {
     const { job } = await generationService.create({
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
       mockScenario: 'success',
     });
 
@@ -434,9 +421,8 @@ describe('JobPoller lifecycle', () => {
     const { job } = await generationService.create({
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
       mockScenario: 'failure',
     });
     const poller = new JobPoller(jobs, mock, mockConfig);
@@ -465,10 +451,10 @@ describe('JobPoller: provider "succeeded" without a usable url', () => {
       promptId: detail.prompt.id,
       promptVersionId: detail.versions[0]!.id,
       renderedPrompt: 'render cat',
-      model: 'MiniMax-H3',
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
       firstFrameUrl: null,
       lastFrameUrl: null,
       referenceImageUrl: null,
@@ -486,11 +472,15 @@ describe('JobPoller: provider "succeeded" without a usable url', () => {
       now: nowIso(),
     });
 
-    // Real adapter over a fake transport returning succeeded WITHOUT a url.
+    // Real adapter over a fake transport returning Success WITHOUT a
+    // file_id (so the result cannot be retrieved).
     const provider = new MinimaxProvider({
-      baseUrl: 'https://api.minimaxi.com',
+      baseUrl: 'https://api.minimax.io',
       apiKey: 'test-key',
-      fetch: fakeFetch({ task: { status: 'succeeded' } }),
+      fetch: fakeFetch({
+        status: 'Success',
+        base_resp: { status_code: 0, status_msg: 'success' },
+      }),
     });
     const poller = new JobPoller(jobs, provider, mockConfig);
     await poller.tick();
@@ -500,7 +490,7 @@ describe('JobPoller: provider "succeeded" without a usable url', () => {
     expect(final?.status).toBe('failed');
     expect(final?.resultUrl).toBeNull();
     expect(final?.errorCode).toBe('provider_failure');
-    expect(final?.errorMessage).toMatch(/no usable result URL/i);
+    expect(final?.errorMessage).toMatch(/file_id/i);
     expect(final?.completedAt).not.toBeNull();
   });
 });
@@ -527,9 +517,8 @@ describe('GenerationService error vocabulary', () => {
     const result = await svc.create({
       promptVersionId: detail.versions[0]!.id,
       values: { subject: 'cat' },
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      durationSeconds: 6,
+      resolution: '768P',
     });
     expect(result.job.status).toBe('failed');
     // Single vocabulary: the persisted error_code is the ProviderErrorCategory
@@ -546,10 +535,10 @@ describe('JobPoller compare-and-set interleaving', () => {
       promptId: detail.prompt.id,
       promptVersionId: detail.versions[0]!.id,
       renderedPrompt: 'render cat',
-      model: 'MiniMax-H3',
-      durationSeconds: 5,
-      aspectRatio: '16:9',
-      resolution: '2K',
+      model: 'MiniMax-Hailuo-2.3',
+      durationSeconds: 6,
+      aspectRatio: 'native',
+      resolution: '768P',
       firstFrameUrl: null,
       lastFrameUrl: null,
       referenceImageUrl: null,

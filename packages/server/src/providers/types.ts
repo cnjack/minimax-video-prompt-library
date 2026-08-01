@@ -16,13 +16,9 @@ export interface CreateJobInput {
   renderedPrompt: string;
   model: string;
   durationSeconds: number;
-  aspectRatio: string;
   resolution: string;
+  /** Optional first-frame image URL (MiniMax-Hailuo-2.3 image-to-video). */
   firstFrameUrl?: string;
-  lastFrameUrl?: string;
-  referenceImageUrl?: string;
-  referenceVideoUrl?: string;
-  referenceAudioUrl?: string;
   /** Honored only by the mock provider. */
   mockScenario?: MockScenario;
 }

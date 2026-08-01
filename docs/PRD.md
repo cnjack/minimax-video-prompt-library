@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Video teams repeatedly rewrite MiniMax H3 prompts in documents and chat, lose
+Video teams repeatedly rewrite MiniMax Hailuo prompts in documents and chat, lose
 which prompt produced a useful result, and have no safe place to manage the
 asynchronous generation lifecycle. A product builder needs one local,
 self-hostable workspace where prompts are reusable assets, generations are
@@ -11,9 +11,9 @@ traceable, and API credentials never reach the browser or repository.
 ## Solution
 
 Build **H3 Prompt Studio**, a single-user web application that combines a
-versioned video-prompt library with MiniMax H3 generation jobs. A user can
+versioned video-prompt library with MiniMax Hailuo generation jobs. A user can
 create and search prompt templates, declare and fill variables, preview the
-rendered prompt, submit a valid MiniMax H3 job, observe its state, and revisit
+rendered prompt, submit a valid MiniMax Hailuo job, observe its state, and revisit
 the output and exact prompt version later.
 
 The PoC must be a complete, polished vertical slice that runs locally without a
@@ -27,17 +27,19 @@ when a key is configured.
 3. As a video creator, I want to use `{{variable}}` placeholders, so that one template can cover many subjects and settings.
 4. As a video creator, I want variables detected automatically and editable in a form, so that I do not manually synchronize template metadata.
 5. As a video creator, I want to preview the final rendered prompt before submission, so that mistakes do not spend generation credits.
-6. As a video creator, I want validation for missing variables, prompt content, duration, aspect ratio, and resolution, so that invalid requests fail before reaching MiniMax.
+6. As a video creator, I want validation for missing variables, prompt content, duration, and resolution, so that invalid requests fail before reaching MiniMax.
 7. As a video creator, I want each meaningful prompt edit saved as a new immutable version, so that past generations remain reproducible.
 8. As a video creator, I want to see version history and restore an old version as a new head, so that experimentation is reversible.
 9. As a video creator, I want full-text search and tag/status filters, so that I can find a prompt quickly.
 10. As a video creator, I want to duplicate a prompt, so that I can explore a variation without overwriting the original.
 11. As a video creator, I want to archive rather than destroy prompts by default, so that generated work does not lose its context.
 12. As a video creator, I want a focused generation composer launched from a prompt version, so that the library and creation workflow feel connected.
-13. As a video creator, I want to choose an H3 duration from 4–15 seconds and a supported aspect ratio, so that the request matches the official API contract.
-14. As a video creator, I want text-to-video to use explicit non-adaptive aspect ratios, so that server-side validation catches an H3 API incompatibility.
-15. As a video creator, I want the H3 resolution represented honestly as 2K, so that the interface does not advertise unsupported choices.
-16. As a video creator, I want optional first-frame, last-frame, reference-image, reference-video, and reference-audio URL inputs, so that I can use H3 multimodal controls without uploading secrets through the browser.
+13. As a video creator, I want to choose a Hailuo duration of 6 or 10 seconds
+    and a supported resolution (`768P`/`1080P`), so that the request matches the
+    official MiniMax-Hailuo-2.3 API contract.
+14. As a video creator, I want invalid duration/resolution combinations (10 seconds only at 768P) rejected before submission, so that server-side validation catches a MiniMax-Hailuo-2.3 API incompatibility.
+15. As a video creator, I want resolution represented honestly as 768P or 1080P, so that the interface does not advertise unsupported choices.
+16. As a video creator, I want an optional first-frame image-to-video URL input (and unsupported last-frame / reference media visibly disabled), so that I can use the Hailuo-2.3 image-to-video control without uploading secrets through the browser.
 17. As a video creator, I want a generation request to return immediately with a local job identifier, so that a slow provider does not block the UI.
 18. As a video creator, I want queued, running, succeeded, failed, and expired states shown clearly, so that I know whether to wait or act.
 19. As a video creator, I want automatic status refresh with a visible last-updated time, so that progress is understandable without reloading.
@@ -73,10 +75,13 @@ when a key is configured.
 - Isolate the MiniMax integration behind a `VideoProvider`-style interface with
   create/query operations. Provide both real MiniMax and deterministic mock
   adapters selected by server configuration.
-- The real adapter targets the official MiniMax H3 V2 endpoint, uses model
-  `MiniMax-H3`, constructs its multimodal `content` array, sends credentials as
-  server-side authorization, and maps provider task states into the local job
-  state machine.
+- The real adapter targets the official MiniMax-Hailuo-2.3 general video
+  endpoint (`POST /v1/video_generation`), uses model `MiniMax-Hailuo-2.3`, sends
+  a flat request body (`prompt`, `duration`, `resolution`, optional
+  `first_frame_image`), sends credentials as server-side authorization, queries
+  `GET /v1/query/video_generation?task_id=…`, resolves the result via
+  `GET /v1/files/retrieve?file_id=…`, and maps provider task states into the
+  local job state machine.
 - Poll provider state from the server, not the browser directly. Ensure only
   non-terminal jobs are polled, apply bounded retry/backoff, and make repeated
   polling idempotent. A simple in-process poller is sufficient for this
@@ -108,8 +113,9 @@ when a key is configured.
 
 - Test externally visible behavior and state transitions, not private function
   calls or framework details.
-- Unit-test template variable detection/rendering and H3 request validation with
-  boundary values, including 4/15 seconds and all supported aspect ratios.
+- Unit-test template variable detection/rendering and Hailuo-2.3 request validation
+  with boundary values, including 6/10 durations, 768P/1080P resolution, the
+  2000-character prompt limit, and the 10s-only-at-768P rule.
 - Unit-test MiniMax request mapping and provider error/state mapping through a
   fake HTTP transport; paid API calls are forbidden in automated tests.
 - Integration-test SQLite repositories, version restore semantics, archived
@@ -135,9 +141,20 @@ when a key is configured.
 
 ## Further Notes
 
-- Official API source of truth: `POST https://api.minimaxi.com/v2/video_generation`.
-  H3 currently returns a provider `task_id` and uses asynchronous query; statuses
-  include queued, running, succeeded, failed, and expired.
+- Official API source of truth (current): the MiniMax-Hailuo-2.3 general video
+  API — `POST https://api.minimax.io/v1/video_generation`,
+  `GET /v1/query/video_generation?task_id=…`, and
+  `GET /v1/files/retrieve?file_id=…`. It returns a flat provider `task_id`, uses
+  asynchronous query with statuses `Preparing`/`Queueing`/`Processing`/`Success`/
+  `Fail` (mapped to local queued/running/succeeded/failed), carries a `base_resp`
+  whose nonzero `status_code` is a typed error, and resolves the result
+  `file.download_url` from the `file_id` returned on success.
+- **Migration note (legacy H3 contract).** An earlier draft of this product
+  targeted the obsolete `MiniMax-H3` / `/v2` multimodal `content[]` contract
+  (arbitrary 4–15s durations, `ratio`, `2K` resolution, last-frame and reference
+  media). None of that is sent or accepted for new jobs anymore; the only
+  remnant is the retained `aspect_ratio` database column, which keeps historical
+  stored jobs readable (new jobs store the `native` sentinel).
 - The supplied coding-model credential is unrelated to MiniMax video-generation
   credentials. The application must work end-to-end in mock mode until a
   separate `MINIMAX_API_KEY` is supplied.

@@ -25,27 +25,17 @@ export function computePayloadHash(input: {
   /** Rendered-prompt override (e.g. with inserted camera cues). */
   prompt?: string;
   durationSeconds: number;
-  aspectRatio: string;
   resolution: string;
   firstFrameUrl?: string;
-  lastFrameUrl?: string;
-  referenceImageUrl?: string;
-  referenceVideoUrl?: string;
-  referenceAudioUrl?: string;
 }): string {
   const normalized = {
     promptVersionId: input.promptVersionId,
     durationSeconds: input.durationSeconds,
-    aspectRatio: input.aspectRatio,
     resolution: input.resolution,
     prompt: input.prompt ?? '',
     values: sortRecord(input.values),
     urls: sortRecord({
       firstFrameUrl: input.firstFrameUrl ?? '',
-      lastFrameUrl: input.lastFrameUrl ?? '',
-      referenceImageUrl: input.referenceImageUrl ?? '',
-      referenceVideoUrl: input.referenceVideoUrl ?? '',
-      referenceAudioUrl: input.referenceAudioUrl ?? '',
     }),
   };
   return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');

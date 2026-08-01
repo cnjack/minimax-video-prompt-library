@@ -42,10 +42,10 @@ function baseJob(overrides: Record<string, unknown> = {}) {
     promptId: p.id,
     promptVersionId: v.id,
     renderedPrompt: 'rendered',
-    model: 'MiniMax-H3',
+    model: 'MiniMax-Hailuo-2.3',
     durationSeconds: 6,
-    aspectRatio: '16:9',
-    resolution: '2K',
+    aspectRatio: 'native',
+    resolution: '768P',
     firstFrameUrl: null,
     lastFrameUrl: null,
     referenceImageUrl: null,
@@ -111,6 +111,48 @@ describe('JobRepository', () => {
   it('creates and retrieves a job', () => {
     const job = baseJob();
     expect(jobs.getById(job.id)?.status).toBe('queued');
+  });
+
+  it('reads back historical (legacy-contract) job rows without loss', () => {
+    // A job persisted under the obsolete H3/v2 contract (old model, an aspect
+    // ratio, 2K resolution, reference media, a pre-Hailuo duration) must remain
+    // fully readable after the provider correction — only new submissions change.
+    const legacy = jobs.create({
+      id: newId(),
+      promptId: makePrompt().id,
+      promptVersionId: versions.create({ id: newId(), promptId: makePrompt().id, content: 'x', now: nowIso() }).id,
+      renderedPrompt: 'legacy rendered',
+      model: 'MiniMax-H3',
+      durationSeconds: 8,
+      aspectRatio: '16:9',
+      resolution: '2K',
+      firstFrameUrl: 'https://e.com/ff.png',
+      lastFrameUrl: 'https://e.com/lf.png',
+      referenceImageUrl: 'https://e.com/ri.png',
+      referenceVideoUrl: null,
+      referenceAudioUrl: null,
+      status: 'succeeded',
+      provider: 'mock',
+      providerTaskId: 'legacy-task',
+      resultUrl: 'https://x/legacy.mp4',
+      errorCode: null,
+      errorMessage: null,
+      idempotencyKey: 'legacy-key',
+      idempotencyPayloadHash: 'legacy-hash',
+      parameters: { legacy: true },
+      now: nowIso(),
+    });
+    const read = jobs.getById(legacy.id);
+    expect(read?.model).toBe('MiniMax-H3');
+    expect(read?.aspectRatio).toBe('16:9');
+    expect(read?.resolution).toBe('2K');
+    expect(read?.durationSeconds).toBe(8);
+    expect(read?.firstFrameUrl).toBe('https://e.com/ff.png');
+    expect(read?.lastFrameUrl).toBe('https://e.com/lf.png');
+    expect(read?.referenceImageUrl).toBe('https://e.com/ri.png');
+    expect(read?.status).toBe('succeeded');
+    expect(read?.resultUrl).toBe('https://x/legacy.mp4');
+    expect((read?.parameters as { legacy?: boolean }).legacy).toBe(true);
   });
 
   it('finds jobs by idempotency key', () => {

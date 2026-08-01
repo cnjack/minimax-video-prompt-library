@@ -1,24 +1,23 @@
-/** Generation composer: render variables, pick H3 parameters, and submit a
- * protected generation request. Launched from a prompt version.
+/** Generation composer: render variables, pick MiniMax-Hailuo-2.3 parameters,
+ * and submit a protected generation request. Launched from a prompt version.
  *
- * The composer also offers H3 camera-movement preset chips (see
- * `@h3/shared` `cameraPresets`). Activating a chip inserts the preset's token at
- * the current prompt cursor without disturbing the surrounding text. The edited
- * prompt is sent as a rendered-prompt override so it is still validated through
- * the existing H3 request policy (character limit etc.) before submission. */
+ * The composer also offers camera-movement preset chips (see `@h3/shared`
+ * `cameraPresets`). Activating a chip inserts the preset's token at the current
+ * prompt cursor without disturbing the surrounding text. The edited prompt is
+ * sent as a rendered-prompt override so it is still validated through the
+ * MiniMax policy (character limit etc.) before submission. */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CAMERA_PRESETS,
+  MINIMAX_DEFAULT_RESOLUTION,
+  MINIMAX_DURATIONS,
+  MINIMAX_MAX_PROMPT_CHARS,
+  MINIMAX_MODEL,
+  MINIMAX_RESOLUTIONS,
   findMissingVariables,
-  H3_ADAPTIVE_RATIO,
-  H3_CONCRETE_RATIOS,
-  H3_MAX_DURATION_SECONDS,
-  H3_MIN_DURATION_SECONDS,
-  H3_RATIOS,
-  H3_RESOLUTION,
   insertTokenAtSelection,
-  mediaMode,
+  isDurationResolutionCompatible,
   renderTemplate,
   UnresolvedVariableError,
   type CameraPreset,
@@ -67,13 +66,9 @@ export function Composer({
   // Restored to the DOM after a chip insert so the caret lands after the token.
   const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
 
-  const [duration, setDuration] = useState(6);
-  const [aspectRatio, setAspectRatio] = useState<string>(H3_CONCRETE_RATIOS[0]);
+  const [duration, setDuration] = useState<number>(MINIMAX_DURATIONS[0]);
+  const [resolution, setResolution] = useState<string>(MINIMAX_DEFAULT_RESOLUTION);
   const [firstFrame, setFirstFrame] = useState('');
-  const [lastFrame, setLastFrame] = useState('');
-  const [refImage, setRefImage] = useState('');
-  const [refVideo, setRefVideo] = useState('');
-  const [refAudio, setRefAudio] = useState('');
   const [scenario, setScenario] = useState<(typeof MOCK_SCENARIOS)[number]>('success');
 
   const [submitting, setSubmitting] = useState(false);
@@ -157,27 +152,17 @@ export function Composer({
     }
   }, [effectivePrompt]);
 
-  // Conditional H3 ratio behavior, exposed honestly in the UI:
-  //  - text-to-video requires a concrete ratio;
-  //  - first/last-frame mode is adaptive;
-  //  - reference mode may use adaptive or concrete.
-  const { mode: mediaModeValue, ratios: availableRatios, effectiveRatio } = useMemo(() => {
-    const m = mediaMode({
-      firstFrameUrl: firstFrame,
-      lastFrameUrl: lastFrame,
-      referenceImageUrl: refImage,
-      referenceVideoUrl: refVideo,
-      referenceAudioUrl: refAudio,
-    });
-    const ratios: readonly string[] =
-      m === 'frame'
-        ? [H3_ADAPTIVE_RATIO]
-        : m === 'reference'
-          ? H3_RATIOS
-          : H3_CONCRETE_RATIOS;
-    const ratio = ratios.includes(aspectRatio) ? aspectRatio : ratios[0]!;
-    return { mode: m, ratios, effectiveRatio: ratio };
-  }, [firstFrame, lastFrame, refImage, refVideo, refAudio, aspectRatio]);
+  // MiniMax-Hailuo-2.3 duration/resolution rule: 10s is only supported at 768P,
+  // so 1080P is only offered at 6s. When the duration rules out the current
+  // resolution, clamp it back to a compatible value.
+  const availableResolutions = useMemo(
+    () =>
+      MINIMAX_RESOLUTIONS.filter((r) => isDurationResolutionCompatible(duration, r)),
+    [duration],
+  );
+  const effectiveResolution = availableResolutions.includes(resolution as never)
+    ? resolution
+    : availableResolutions[0]!;
 
   const canSubmit = missing.length === 0 && !promptStale && !submitting;
 
@@ -216,16 +201,11 @@ export function Composer({
       promptVersionId: versionId,
       values,
       // The rendered prompt (with any inserted camera cues) is the exact text
-      // generated. The server still enforces the H3 character limit on it.
+      // generated. The server still enforces the MiniMax character limit on it.
       prompt: effectivePrompt,
       durationSeconds: duration,
-      aspectRatio: effectiveRatio as CreateGenerationRequest['aspectRatio'],
-      resolution: H3_RESOLUTION,
+      resolution: effectiveResolution as CreateGenerationRequest['resolution'],
       firstFrameUrl: firstFrame || undefined,
-      lastFrameUrl: lastFrame || undefined,
-      referenceImageUrl: refImage || undefined,
-      referenceVideoUrl: refVideo || undefined,
-      referenceAudioUrl: refAudio || undefined,
       idempotencyKey,
       ...(mode === 'mock' ? { mockScenario: scenario } : {}),
     };
@@ -256,13 +236,6 @@ export function Composer({
 
   if (loading) return <Spinner label="Loading composer…" />;
 
-  const ratioHint =
-    mediaModeValue === 'frame'
-      ? 'First/last-frame mode uses an adaptive ratio.'
-      : mediaModeValue === 'reference'
-        ? 'Reference mode may use adaptive or a concrete ratio.'
-        : 'Text-to-video requires an explicit (non-adaptive) ratio.';
-
   return (
     <>
       <div className="topbar">
@@ -276,7 +249,7 @@ export function Composer({
           <h1 style={{ marginTop: 8 }}>Generation composer</h1>
           <div className="row" style={{ marginTop: 4 }}>
             <Badge status="queued" />
-            <span className="muted">model MiniMax-H3 · resolution {H3_RESOLUTION}</span>
+            <span className="muted">model {MINIMAX_MODEL}</span>
           </div>
         </div>
       </div>
@@ -365,7 +338,7 @@ export function Composer({
             <Field
               label="Rendered prompt"
               htmlFor="c-prompt"
-              hint="Camera cues insert at the cursor. This exact text is generated and still validated before submission."
+              hint={`Camera cues insert at the cursor. Up to ${MINIMAX_MAX_PROMPT_CHARS} characters. This exact text is generated and still validated before submission.`}
             >
               <textarea
                 id="c-prompt"
@@ -398,40 +371,46 @@ export function Composer({
 
         <div>
           <div className="card">
-            <div className="section-title">H3 parameters</div>
-            <Field label={`Duration (${H3_MIN_DURATION_SECONDS}–${H3_MAX_DURATION_SECONDS} seconds)`} htmlFor="c-dur">
+            <div className="section-title">MiniMax-Hailuo-2.3 parameters</div>
+            <Field label="Duration" htmlFor="c-dur" hint="6 or 10 seconds.">
               <select
                 id="c-dur"
                 value={duration}
                 onChange={(e) => setDuration(Number(e.target.value))}
               >
-                {Array.from(
-                  { length: H3_MAX_DURATION_SECONDS - H3_MIN_DURATION_SECONDS + 1 },
-                  (_, i) => H3_MIN_DURATION_SECONDS + i,
-                ).map((d) => (
+                {MINIMAX_DURATIONS.map((d) => (
                   <option key={d} value={d}>
                     {d}s
                   </option>
                 ))}
               </select>
             </Field>
-            <Field label="Aspect ratio" htmlFor="c-ar" hint={ratioHint}>
+            <Field
+              label="Resolution"
+              htmlFor="c-res"
+              hint={
+                duration === 10
+                  ? '10-second video is only supported at 768P.'
+                  : '768P (default) or 1080P.'
+              }
+            >
               <select
-                id="c-ar"
-                value={effectiveRatio}
-                onChange={(e) => setAspectRatio(e.target.value)}
-                disabled={mediaModeValue === 'frame'}
+                id="c-res"
+                value={effectiveResolution}
+                onChange={(e) => setResolution(e.target.value)}
               >
-                {availableRatios.map((ar) => (
-                  <option key={ar} value={ar}>
-                    {ar}
+                {MINIMAX_RESOLUTIONS.map((r) => (
+                  <option
+                    key={r}
+                    value={r}
+                    // 1080P at 10s is not supported by Hailuo-2.3 — visibly disabled.
+                    disabled={
+                      duration === 10 && !isDurationResolutionCompatible(duration, r)
+                    }
+                  >
+                    {r}
                   </option>
                 ))}
-              </select>
-            </Field>
-            <Field label="Resolution" htmlFor="c-res">
-              <select id="c-res" value={H3_RESOLUTION} disabled>
-                <option value={H3_RESOLUTION}>{H3_RESOLUTION} (H3)</option>
               </select>
             </Field>
 
@@ -455,21 +434,19 @@ export function Composer({
           </div>
 
           <div className="card">
-            <div className="section-title">Optional references (http(s) URLs)</div>
-            <Field label="First frame image URL" htmlFor="c-ff">
-              <input id="c-ff" type="url" value={firstFrame} onChange={(e) => setFirstFrame(e.target.value)} placeholder="https://…" />
-            </Field>
-            <Field label="Last frame image URL" htmlFor="c-lf">
-              <input id="c-lf" type="url" value={lastFrame} onChange={(e) => setLastFrame(e.target.value)} placeholder="https://…" />
-            </Field>
-            <Field label="Reference image URL" htmlFor="c-ri">
-              <input id="c-ri" type="url" value={refImage} onChange={(e) => setRefImage(e.target.value)} placeholder="https://…" />
-            </Field>
-            <Field label="Reference video URL" htmlFor="c-rv">
-              <input id="c-rv" type="url" value={refVideo} onChange={(e) => setRefVideo(e.target.value)} placeholder="https://…" />
-            </Field>
-            <Field label="Reference audio URL" htmlFor="c-ra">
-              <input id="c-ra" type="url" value={refAudio} onChange={(e) => setRefAudio(e.target.value)} placeholder="https://…" />
+            <div className="section-title">Image-to-video (optional)</div>
+            <Field
+              label="First frame image URL"
+              htmlFor="c-ff"
+              hint="First-frame image-to-video. Last-frame and reference media are not supported by MiniMax-Hailuo-2.3."
+            >
+              <input
+                id="c-ff"
+                type="url"
+                value={firstFrame}
+                onChange={(e) => setFirstFrame(e.target.value)}
+                placeholder="https://…"
+              />
             </Field>
           </div>
 

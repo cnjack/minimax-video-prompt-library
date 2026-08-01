@@ -97,7 +97,7 @@ export function JobsList() {
               <div>
                 <Badge status={j.status} pulse={j.status === 'running'} />
                 <div className="muted" style={{ marginTop: 4 }}>
-                  {j.model} · {j.durationSeconds}s · {j.aspectRatio}
+                  {j.model} · {j.durationSeconds}s · {j.resolution}
                   {' · '}
                   {new Date(j.createdAt).toLocaleString()}
                 </div>
@@ -316,8 +316,6 @@ export function JobDetail({ jobId }: { jobId: string }) {
           <dd>{job.model}</dd>
           <dt>Duration</dt>
           <dd>{job.durationSeconds}s</dd>
-          <dt>Aspect ratio</dt>
-          <dd>{job.aspectRatio}</dd>
           <dt>Resolution</dt>
           <dd>{job.resolution}</dd>
           <dt>Created</dt>
